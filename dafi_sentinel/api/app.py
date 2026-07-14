@@ -414,8 +414,12 @@ def create_workbench_app(
         )
         return response
 
-    @app.delete("/sessions/{token}", status_code=status.HTTP_204_NO_CONTENT)
-    def logout(token: str, request: Request) -> None:
+    @app.delete(
+        "/sessions/{token}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+    )
+    def logout(token: str, request: Request) -> Response:
         """Logout via the bearer path (non-browser clients).
 
         The dashboard uses ``DELETE /sessions/me`` (cookie path). curl
@@ -444,7 +448,17 @@ def create_workbench_app(
             actor_id=stored.user.id,
             session_id=hash_session_id(session.token),
         )
-        return None
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        # RFC 8594 Deprecation header (boolean) and RFC 8594 Sunset
+        # header (planned removal date). The Sunset date is set 180
+        # days out from module import so a future operator has time
+        # to migrate.
+        from datetime import datetime, timedelta, timezone
+        sunset = datetime.now(timezone.utc) + timedelta(days=180)
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = sunset.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        response.headers["Link"] = '</sessions/me>; rel="successor-version"'
+        return response
 
     @app.get("/sessions/me", response_model=SessionResponse)
     def me(request: Request) -> SessionResponse:
