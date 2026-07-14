@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import secrets
-from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -304,23 +303,3 @@ def png_to_base64(png_bytes: bytes) -> str:
 
 def base64_to_png(payload: str) -> bytes:
     return base64.b64decode(payload.encode("ascii"))
-
-
-@dataclass
-class RecentEvidenceCache:
-    """Tiny LRU-ish helper that keeps the most recent evidence ids in
-    stable order. Currently unused by the workbench surface but kept for
-    testability of session-relative evidence lists."""
-
-    capacity: int = 32
-    _items: deque[str] = field(default_factory=deque)
-
-    def push(self, evidence_id: str) -> None:
-        if evidence_id in self._items:
-            self._items.remove(evidence_id)
-        self._items.append(evidence_id)
-        while len(self._items) > self.capacity:
-            self._items.popleft()
-
-    def snapshot(self) -> tuple[str, ...]:
-        return tuple(self._items)
