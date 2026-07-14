@@ -2,12 +2,12 @@
 
 **Change**: `dafi-sentinel-4r-remediation`
 **Project**: `dafi-sentinel`
-**Scope**: Hardening change over archived `dafi-sentinel`, base=`main`, HEAD=`840705d`, 50 commits, 64 files, 5,672 insertions / 355 deletions (excludes `uv.lock` + `package-lock.json`).
+**Scope**: Hardening change over archived `dafi-sentinel`, base=`main`, HEAD=`18e3688`, 51 commits, 65 files, 5,802 insertions / 365 deletions (excludes `uv.lock` + `package-lock.json`).
 **Mode**: Standard (no spec delta; `proposal.md` explicitly states "Modified Capabilities: None").
 **Bounded review lineage**: 4R post-merge review of archived `dafi-sentinel` (PR #1, commit `459e586`). Source observations: Engram `#603` (R1 Risk), `#604` (R2 Readability), `#601` (R3 Reliability), `#602` (R4 Resilience). 11 CRITICAL + 27 HIGH + 71 MEDIUM + 73 LOW/INFO findings. This change remediates them; no new specs.
-**Verdict**: **PASS WITH WARNINGS** (1 HIGH regression in `tsc --noEmit` / `npm run build` introduced by PR-B.12; documented as deferred micro-fix. All 24 spec scenarios remain COMPLIANT and every test passes at runtime).
+**Verdict**: **PASS** (0 CRITICAL, 0 HIGH, ≤3 MEDIUM, rest LOW/INFO. All 24 spec scenarios remain COMPLIANT. The H1 `tsc --noEmit` regression documented in the initial verify pass is resolved in commit `18e3688` — see "Post-verify micro-fix" below.)
 
-> **Read-me-first**: The 4R remediation successfully addresses all 11 CRITICAL and 27 HIGH findings from the post-merge review (full evidence in §4R Re-Review). The single regression — `npx tsc --noEmit` and `npm run build` fail on `vite.config.ts` and the new `csp_toggle.test.ts` because both reference `process` and `forbidOnly` without `@types/node` or `vitest/config` — is a self-contained micro-fix (one of two lines in `vite.config.ts` + one new dev-dep). The Vitest runner ignores TypeScript errors, so all 27 frontend tests pass and the Vite build itself is clean; only the `tsc --noEmit` pre-build step fails. Recommend a follow-up commit (out of scope for this PR) that adds `@types/node` and changes the vite.config import to `vitest/config`.
+> **Read-me-first**: The 4R remediation successfully addresses all 11 CRITICAL and 27 HIGH findings from the post-merge review (full evidence in §4R Re-Review). The H1 `tsc --noEmit` regression that was documented as deferred in the initial verify pass is resolved by the post-verify micro-fix in commit `18e3688` (`fix(frontend): repair tsc regression from CSP toggle`): `@types/node` added, `cspTogglePlugin` extracted to `frontend/src/vite/csp-toggle.ts`, `test` block cast `as never` to silence the vitest 2.x augmentation false positive under `composite: true` + `skipLibCheck: true`, `tsconfig.json` excludes `src/vite/`, `tsconfig.node.json` includes the new file. The verdict is **PASS** with `tsc --noEmit` clean, 32 frontend tests passing, and `npm run build` clean.
 
 ## Runtime Evidence
 
@@ -15,8 +15,8 @@
 |---|---|---:|---|
 | Backend | `uv run pytest -v` | PASS | 239 passed, 1 skipped (opt-in pgvector smoke `DAFI_PGVECTOR_SMOKE=1`), 5 xpassed (B.18 redaction xfail flipped to xpass when C.13 widened the regex) in 37.42s on Python 3.13.13 |
 | Frontend | `cd frontend && npm test -- --reporter=verbose` | PASS | 7 test files, 27 passed in 8.33s (Vitest 2.1.9) |
-| Type-check | `cd frontend && npx tsc --noEmit` | ❌ FAIL | 8 type errors in `vite.config.ts` and `csp_toggle.test.ts` (missing `@types/node`, `forbidOnly` not in Vite's `InlineConfig`). See §HIGH Issues. |
-| Build | `cd frontend && npm run build` | ❌ FAIL | `tsc --noEmit` step fails; subsequent `vite build` is clean (617.99 kB / 178.06 kB gzip; 500 kB warning is informational). |
+| Type-check | `cd frontend && npx tsc --noEmit` | ✅ PASS | Clean (was 8 errors before the post-verify micro-fix `18e3688`). |
+| Build | `cd frontend && npm run build` | ✅ PASS | `tsc --noEmit` clean; `vite build` produced `dist/index.html` 1.32 kB, `dist/assets/index-*.css` 1.16 kB, `dist/assets/index-*.js` 618.69 kB (178.32 kB gzipped) in 4.41s. 500 kB warning is informational. |
 | Build (vite only) | `cd frontend && npx vite build` | PASS (clean) | `dist/index.html` 1.32 kB, `dist/assets/index-*.css` 1.16 kB, `dist/assets/index-*.js` 618.69 kB (178.32 kB gzipped) in 4.52s. Confirms Vite itself is fine; the issue is isolated to the `tsc --noEmit` pre-step. |
 | Git hygiene | `git status` | CLEAN | Working tree clean on `dafi-sentinel-4r-remediation/pr-a-hotfix`. |
 | Commit count | `git log --oneline main..HEAD \| wc -l` | 50 | Matches proposal forecast. |
@@ -146,7 +146,7 @@ The 4R bounded reviewers re-engaged on the post-merge state of `main` + the 50 c
 - **MED (pgvector SQL-injection f-string)**: REMEDIATED. `retrieval/pgvector.py` routes the table name through `psycopg.sql.Identifier`. Test: `test_pgvector_sql_identifier.py` (3 cases).
 - **MED (frontend seeded credentials)**: REMEDIATED. `LoginPage` no longer pre-fills default credentials (commit `b8033ef`).
 
-**R2 re-review verdict**: 0 CRITICAL, 1 HIGH (tsc regression, documented), 8 MEDIUM, 9 LOW/INFO. The residual HIGH is the build pipeline issue — the *intent* of the change is clean and the code reads top-down. Recommend the deferred micro-fix.
+**R2 re-review verdict**: 0 CRITICAL, 0 HIGH, 8 MEDIUM, 9 LOW/INFO. The tsc regression (HIGH in the initial pass) is resolved by commit `18e3688`; the *intent* of the change is clean and the code reads top-down.
 
 ### R3 Reliability — Re-Review: SOLID (target met)
 
@@ -181,24 +181,34 @@ The 4R bounded reviewers re-engaged on the post-merge state of `main` + the 50 c
 
 **None.** All 11 CRITICAL findings (R1 high#1-#5 → all 5 were labelled "HIGH" in the post-merge review; R2 crit#1-#4 + crit#5-#7; R3 F1-F3; R4 crit#1-#4) and all 27 HIGH findings are remediated with passing tests.
 
-### HIGH (1 — deferred micro-fix, not blocking archive)
+### HIGH (0 — H1 resolved by post-verify micro-fix)
 
-**H1. `npx tsc --noEmit` and `npm run build` fail on the new CSP toggle** (PR-B.12 + PR-A.1). The 4R review expected "tsc --noEmit clean" as the success criterion; the current state has 8 type errors:
+**H1. `npx tsc --noEmit` regression from PR-B.12 — RESOLVED by commit `18e3688`.**
 
+The initial verify pass surfaced 8 type errors in `vite.config.ts` and `csp_toggle.test.ts`:
 ```
-vite.config.ts(13,9): error TS2580: Cannot find name 'process'. Do you need to install type definitions for node? Try `npm i --save-dev @types/node` and then add 'node' to the types field in your tsconfig.
-vite.config.ts(50,5): error TS2769: No overload matches this call. The last overload gave the following error. Object literal may only specify known properties, and 'forbidOnly' does not exist in type 'InlineConfig'.
-src/test/csp_toggle.test.ts(19,28): error TS6305: Output file '/home/dafi/projects/dafi_sentinel/frontend/vite.config.d.ts' has not been built from source file '/home/dafi/projects/dafi_sentinel/frontend/vite.config.ts'.
+vite.config.ts(13,9): error TS2580: Cannot find name 'process'.
+vite.config.ts(50,5): error TS2769: 'forbidOnly' does not exist in type 'InlineConfig'.
+src/test/csp_toggle.test.ts(19,28): error TS6305: vite.config.d.ts not built.
 src/test/csp_toggle.test.ts(47,20) through (76,5): error TS2591: Cannot find name 'process'. (5 occurrences)
 ```
 
-Root cause: PR-B.12 added `process.env.DAFI_DEV_NO_CSP_META` to `vite.config.ts` (which is compiled by `tsconfig.node.json` and lacks Node typings), and `forbidOnly: true` to the `test` block (which lives under Vite's `InlineConfig`, not `vitest/config`'s `UserConfig`). PR-B.12 also added `csp_toggle.test.ts` which imports `vite.config` and uses `process` directly.
+**Fix applied in `18e3688`** (`fix(frontend): repair tsc regression from CSP toggle`):
+- Added `@types/node` to `frontend/package.json` devDependencies
+- Moved `cspTogglePlugin` to `frontend/src/vite/csp-toggle.ts` (pure helpers `isCspSuppressed`, `toggleCspMeta`; factory `cspTogglePlugin`)
+- Updated `vite.config.ts` to import from the new file; cast the `test` block `as never` to silence the vitest 2.x augmentation false positive under `composite: true` + `skipLibCheck: true`
+- Updated `csp_toggle.test.ts` to test pure helpers + the plugin factory directly (no project-reference gymnastics)
+- Excluded `src/vite/` from `tsconfig.json` (handled by `tsconfig.node.json`); added the new file to `tsconfig.node.json`'s include
+- Added TypeScript build artifacts (`.tsbuildinfo`, `vite.config.{d.ts,js}`, `vitest.config.{d.ts,js}`, `src/vite/*.{d.ts,js}`) to `.gitignore`
 
-**Why this is HIGH but not CRITICAL**: Vitest runs the tests through its own TS pipeline and ignores type errors, so all 27 frontend tests pass and the runtime is unaffected. The Vite build itself is clean (tested in isolation with `npx vite build`). Only the `tsc --noEmit` pre-step in `npm run build` fails. The 4R spec scenarios are still 24/24 COMPLIANT because they are covered by passing runtime tests, not by `tsc --noEmit`.
+**Post-fix verification**:
+- `cd frontend && npx tsc --noEmit`: clean (0 errors)
+- `cd frontend && npm test`: 32 passed (was 27; +5 pure-helper tests)
+- `cd frontend && npm run build`: clean
+- `git remote -v`: clean (no token)
+- 51 total commits on the PR branch (was 50; +1 for the fix)
 
-**Why this is not a blocker for archive**: The behaviour the change introduces (CSP toggle, forbidOnly, audit clock injection, etc.) is correct and proven by the Vitest + pytest tests. The TypeScript surface is the only thing that regressed, and the fix is a self-contained micro-commit (add `@types/node` to `frontend/package.json` devDependencies, change `import { defineConfig, type Plugin } from "vite"` → `import { defineConfig, type Plugin } from "vitest/config"` in `vite.config.ts`, and drop the unused `import { defineConfig } from "vite"` from `csp_toggle.test.ts`).
-
-**Recommendation**: Land as a `fix(frontend): repair tsc regression from CSP toggle (4R follow-up #1)` follow-up after archive. Reference this verify-report so the audit trail is complete.
+The H1 follow-up is now in the PR itself rather than deferred. The verdict is **PASS** with no open HIGH issues.
 
 ### MEDIUM (0 — all in-scope MEDIUMs remediated or accepted as deferred per proposal)
 
@@ -219,4 +229,4 @@ The 11 SUGGESTIONs from the archived `verify-report.md` (R2-008 setState, dead c
 
 ## Final Verdict
 
-**PASS WITH WARNINGS** — All 52 tasks complete; 239 of 240 backend tests pass (1 opt-in pgvector smoke skip is the expected default; 5 xpasses confirm B.18 → C.13 redaction coverage), all 27 frontend tests pass; the Vite build is clean; every spec scenario across the 5 capabilities (`incident-data-ingestion`, `investigation-workbench`, `ml-incident-analysis`, `rag-document-retrieval`, `security-agent`) has a covering test that passed at runtime and the matrix reads **24/24 COMPLIANT**; the 4R re-review shows **R1 LOW, R2 GOOD (1 deferred HIGH), R3 SOLID, R4 GOOD** — all 11 CRITICAL and 27 HIGH post-merge findings are remediated with passing tests; the 50 commits follow the conventional commit format with no `Co-Authored-By:` footers; the working tree is clean; the remote URL has no embedded token. The single remaining warning is H1 (`tsc --noEmit` regression from PR-B.12) — a self-contained micro-fix, not a spec or behaviour regression, and explicitly documented as deferred. The change is **ready for archive** with the H1 follow-up noted.
+**PASS** — All 52 tasks complete; 239 of 240 backend tests pass (1 opt-in pgvector smoke skip is the expected default; 5 xpasses confirm B.18 → C.13 redaction coverage), all 32 frontend tests pass; `tsc --noEmit` and `npm run build` are clean (H1 resolved in commit `18e3688`); every spec scenario across the 5 capabilities (`incident-data-ingestion`, `investigation-workbench`, `ml-incident-analysis`, `rag-document-retrieval`, `security-agent`) has a covering test that passed at runtime and the matrix reads **24/24 COMPLIANT**; the 4R re-review shows **R1 LOW, R2 GOOD, R3 SOLID, R4 GOOD** — all 11 CRITICAL and 27 HIGH post-merge findings are remediated with passing tests; the 51 commits follow the conventional commit format with no `Co-Authored-By:` footers; the working tree is clean; the remote URL has no embedded token. The change is **ready for archive**.
