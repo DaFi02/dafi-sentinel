@@ -313,17 +313,34 @@ def create_workbench_app(
     app.state.sweep_graph = sweep_graph
 
     def _resolve_token(request: Request) -> str:
-        """Resolve a session token from the cookie first, then the bearer header.
+        """Resolve the session token from the request.
 
-        The cookie is the primary transport (dashboard path). The
+        The cookie is the primary transport (dashboard path); the
         bearer header is a fallback kept for non-browser clients
-        (curl, CLI). The dispatcher's CRIT-1 fix pins this two-path
-        contract.
+        (curl, CLI). When BOTH transports are present, the bearer
+        header wins (RFC 6750 §2 — the ``Authorization`` header is
+        the explicit credential and the cookie is incidental). This
+        is also the safer precedence: a cookie with a stale token
+        cannot override a fresh bearer that the client supplied
+        explicitly.
+
+        PR-C.12 (R2 med): the 4R review caught that the prior
+        ``cookie-first`` precedence was a footgun — a stale cookie
+        could win over a fresh bearer and confuse the dispatch.
+        The behavior is now pinned to ``bearer-wins`` with an
+        explicit test in ``tests/dafi_sentinel/test_api_auth.py``
+        so a future refactor cannot silently change the precedence.
         """
+        bearer_token = _extract_bearer_optional(request)
+        if bearer_token:
+            return bearer_token
         cookie_token = request.cookies.get(cookie_name)
         if cookie_token:
             return cookie_token
-        return _extract_bearer(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing session cookie or bearer token",
+        )
 
     def _session_from_header(request: Request) -> tuple[Session, StoredUser]:
         token = _resolve_token(request)
@@ -622,6 +639,21 @@ def _extract_bearer(request: Request) -> str:
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="missing bearer token")
     return token
+
+
+def _extract_bearer_optional(request: Request) -> str | None:
+    """Return the bearer token if the header is present and well-formed.
+
+    Unlike :func:`_extract_bearer`, this helper does NOT raise on a
+    missing header; it returns ``None`` instead. The cookie+bearer
+    precedence rule (PR-C.12, RFC 6750) needs a "is the bearer
+    present?" check that does not interfere with the cookie path.
+    """
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        return None
+    token = header.split(" ", 1)[1].strip()
+    return token or None
 
 
 def _evidence_to_response(record: Any) -> EvidenceResponse:
