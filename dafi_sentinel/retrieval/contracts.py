@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from dafi_sentinel.domain.models import Document, EvidenceRef
 
 
+@runtime_checkable
 class RetrievalIndex(Protocol):
     def search(self, query: str, limit: int) -> list[EvidenceRef]: ...
 
