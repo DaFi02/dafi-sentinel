@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from dafi_sentinel.domain.models import AuditRecord, EvidenceRef, RedactedIncidentRecord
 
 
+@runtime_checkable
 class EvidenceRepository(Protocol):
     def save_evidence(self, owner_id: str, record: RedactedIncidentRecord) -> EvidenceRef: ...
     def get_evidence(self, evidence_id: str) -> RedactedIncidentRecord | None: ...
@@ -17,5 +18,6 @@ class TimelineRepository(Protocol):
     def list_records(self, session_id: str) -> list[RedactedIncidentRecord]: ...
 
 
+@runtime_checkable
 class AuditRepository(Protocol):
     def write_audit(self, session_id: str, record: AuditRecord) -> None: ...

@@ -81,24 +81,45 @@ class InMemoryEvidenceRepository:
 
 @dataclass
 class InMemoryAuditRepository:
-    """Audit repository that records every decision in memory.
+    """In-memory implementation of the ``AuditRepository`` hexagonal port.
 
-    Stores a chronological list and an index keyed by ``actor_id`` so the
-    API can serve ``GET /audits`` cheaply. The repository is shared
-    between the API and the security gate; the gate keeps writing to its
-    own ``AuditSink`` for policy decisions while the API writes its own
-    audit records for login/logout/Q&A/chart actions.
+    Stores a chronological list and an index keyed by
+    ``(actor_id, session_id)`` so the API can serve both
+    ``GET /audits`` (per-actor, cross-session) and per-session slices
+    cheaply. The 4R review (R2 crit#7) caught the prior implementation
+    dropping the ``session_id`` argument on the floor; the fix surfaces
+    it on a secondary index so reviewers can reconstruct a single
+    session's audit trail without scanning every record for the actor.
+
+    The repository is shared between the API and the security gate; the
+    gate keeps writing to its own :class:`AuditSink` for policy
+    decisions while the API writes its own audit records for
+    login/logout/Q&A/chart actions.
     """
 
     _records: list[AuditRecord] = field(default_factory=list)
     _by_actor: dict[str, list[str]] = field(default_factory=dict)
+    _by_session: dict[tuple[str, str], list[str]] = field(default_factory=dict)
 
     def write_audit(self, session_id: str, record: AuditRecord) -> None:
         self._records.append(record)
         self._by_actor.setdefault(record.actor.id, []).append(record.id)
+        self._by_session.setdefault((record.actor.id, session_id), []).append(record.id)
 
     def list_for_actor(self, actor_id: str) -> tuple[AuditRecord, ...]:
         ids = self._by_actor.get(actor_id, [])
+        index = {record.id: record for record in self._records}
+        return tuple(index[record_id] for record_id in ids if record_id in index)
+
+    def list_for_session(self, actor_id: str, session_id: str) -> tuple[AuditRecord, ...]:
+        """Return the audit records for a single ``(actor_id, session_id)`` pair.
+
+        R2 crit#7: a per-session slice lets a reviewer reconstruct the
+        audit trail of one investigation without re-walking every
+        record for the actor. The order is chronological within the
+        session (insertion order, same as :meth:`list_for_actor`).
+        """
+        ids = self._by_session.get((actor_id, session_id), [])
         index = {record.id: record for record in self._records}
         return tuple(index[record_id] for record_id in ids if record_id in index)
 
@@ -164,6 +185,23 @@ class WorkbenchService:
     """
 
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        # R2 crit#5: belt-and-braces guard. The ``@runtime_checkable``
+        # decorator on the Protocol lets us fail fast on a misconfigured
+        # adapter at construction time instead of crashing on the first
+        # request. ``AuditRepository`` carries the same guarantee; the
+        # asymmetry was caught by the 4R review (R2 med).
+        if not isinstance(self.evidence, EvidenceRepository):
+            raise TypeError(
+                f"WorkbenchService.evidence must implement EvidenceRepository; "
+                f"got {type(self.evidence).__name__}"
+            )
+        if not isinstance(self.audits, AuditRepository):
+            raise TypeError(
+                f"WorkbenchService.audits must implement AuditRepository; "
+                f"got {type(self.audits).__name__}"
+            )
 
     def _index(self) -> RetrievalIndex:
         if self.retrieval_index is not None:
