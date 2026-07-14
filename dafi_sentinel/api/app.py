@@ -45,6 +45,7 @@ from dafi_sentinel.api.schemas import (
     RoleResponse,
     SessionResponse,
 )
+from dafi_sentinel.charts.validation import ChartValidationError
 from dafi_sentinel.api.services import (
     InMemoryAuditRepository,
     InMemoryEvidenceRepository,
@@ -325,6 +326,26 @@ def create_workbench_app(
     @app.exception_handler(HTTPException)
     def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    @app.exception_handler(ChartValidationError)
+    def _chart_validation_handler(_: Request, exc: ChartValidationError) -> JSONResponse:
+        """Map chart-spec validation failures to a structured 422 response.
+
+        R3 F3: the 4R review caught that ``ChartValidationError`` was
+        bubbling up as a generic 500 because FastAPI only knows how to
+        map ``HTTPException``. The Pydantic ``ChartSpecPayload`` schema
+        rejects an empty ``title`` (and any literal that violates the
+        field constraints) before the request reaches the handler, but
+        the domain validator is the source of truth for
+        ``evidence_ids`` and the ``x`` / ``y`` axis fields. Mapping the
+        exception to a 422 with ``{"detail": {"field": ..., "reason":
+        ...}}`` lets the dashboard render a useful inline error instead
+        of an opaque failure.
+        """
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": {"field": exc.field, "reason": exc.reason}},
+        )
 
     return app
 
