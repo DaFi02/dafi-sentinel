@@ -33,4 +33,4 @@
 - [x] 4.1 PR4 add `uv add scikit-learn numpy`, deterministic analysis, chart validation, and controlled matplotlib renderer.
 - [x] 5.1 PR5 add FastAPI auth/session middleware and endpoints for owned sessions, evidence, Q&A, charts, roles, audits.
 - [x] 5.2 PR5 add React + TypeScript + Vite dashboard with authenticated ownership, TanStack Query, and Recharts.
-- [ ] 6.1 PR6 add scoped LangGraph orchestration; approvals must pause execution.
+- [x] 6.1 PR6 add scoped LangGraph orchestration; approvals must pause execution.

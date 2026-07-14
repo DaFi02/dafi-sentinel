@@ -125,5 +125,46 @@ cd frontend && npm run test && npm run build
 
 ## Later slices
 
-LangGraph orchestration arrives in PR6. Grafana and Prometheus are
-explicitly out of scope for this product.
+PR6 ships the LangGraph orchestration layer: a state machine that
+composes the existing PR1-PR5 services and pauses for human approval
+before controlled actions (chart rendering). Grafana, Prometheus, and
+production telemetry are explicitly out of scope for this product.
+
+### LangGraph orchestration (PR6)
+
+The investigation workflow is a scoped state machine that lives under
+``dafi_sentinel/orchestration/``:
+
+* ``dafi_sentinel.orchestration.graph.build_investigation_graph`` — the
+  compiled state graph factory. Takes a ``WorkbenchService`` (PR5), a
+  ``SecurityGate`` (PR2), and an ``AuditRepository`` (PR1) and returns
+  a LangGraph ``CompiledStateGraph`` wired with an ``InMemorySaver``
+  checkpointer.
+* ``InvestigationState`` — the ``TypedDict`` describing the graph
+  state (actor, session, question, cited evidence, answer, chart PNG,
+  approval decision, audit accumulator).
+* ``ApprovalRequest`` — the payload exchanged at the approval node
+  (``approved``, ``approver_id``).
+
+The graph visits these nodes in order:
+
+| Node | Service | Audit action |
+|------|---------|--------------|
+| `inspect` | `SecurityGate.inspect_user_request` (PR2) | `orchestration.inspect` |
+| `retrieve` | `WorkbenchService.answer_question` (PR3 + PR4) | `orchestration.retrieve` |
+| `compose_answer` | fold cited evidence into the answer | — |
+| `request_approval` | `langgraph.types.interrupt` pause | `orchestration.approval` |
+| `render_chart` | `WorkbenchService.render_chart` (PR4) | `orchestration.render_chart` |
+| `finalize` | terminal audit writer | `orchestration.finalize` |
+
+The approval node calls ``langgraph.types.interrupt(...)``; a separate
+test helper (or future CLI) resumes the graph with an
+``ApprovalRequest`` via ``Command(resume=...)``. When the approver
+refuses, the graph skips the chart render and the finalize node
+records ``PolicyDecision(allowed=False, reason="approval-denied")``.
+
+Run the slice tests:
+
+```bash
+uv run pytest tests/dafi_sentinel/test_orchestration.py -v
+```
