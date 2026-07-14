@@ -8,7 +8,26 @@ import re
 from dafi_sentinel.domain.models import ActorRef, AuditRecord, Permission, PolicyDecision, UserRef
 
 
-SECRET_PATTERN = re.compile(r"(?P<token>sk_(?:live|test)_[A-Za-z0-9]+)|password=(?P<password>[^\s]+)", re.IGNORECASE)
+# PR-C.13 (R1 med#11): widen the redaction regex to cover the
+# common secret shapes the 4R review flagged. The pattern keeps
+# the same named-group shape as the pre-PR-C.13 surface so the
+# ``_redact_secret_match`` helper can keep the "key=value" prefix
+# when one is present. The order of the alternation matters: the
+# longest match wins, so ``api_key=sk_live_...`` is captured by
+# the ``api_key`` group, not the ``token`` group.
+SECRET_PATTERN = re.compile(
+    r"(?:"
+    r"(?P<token>sk_(?:live|test)_[A-Za-z0-9]+)"
+    r"|password=(?P<password>[^\s]+)"
+    r"|aws_access_key_id=(?P<aws_access_key>[A-Za-z0-9]+)"
+    r"|aws_secret_access_key=(?P<aws_secret_key>[A-Za-z0-9/+=]+)"
+    r"|(?P<github_pat>github_pat_[A-Za-z0-9_]+)"
+    r"|(?P<github_classic>gh[ps]_[A-Za-z0-9]+)"
+    r"|(?P<jwt>eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"
+    r"|api_key=(?P<api_key>[^\s]+)"
+    r")",
+    re.IGNORECASE,
+)
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
@@ -62,8 +81,20 @@ class RedactionService:
         return self._markers[key]
 
     def _redact_secret_match(self, match: re.Match[str]) -> str:
+        # The named groups for key=value shapes carry ONLY the value
+        # (the prefix lives outside the group), so the redaction
+        # helper rebuilds the "key=[REDACTED:SECRET:N]" string. The
+        # "bare token" patterns (sk_live_, github_pat_, JWT) capture
+        # the entire secret in the group, so the fallback uses
+        # ``match.group(0)``.
         if match.group("password") is not None:
             return f"password={self._marker('SECRET', match.group('password'))}"
+        if match.group("api_key") is not None:
+            return f"api_key={self._marker('SECRET', match.group('api_key'))}"
+        if match.group("aws_access_key") is not None:
+            return f"aws_access_key_id={self._marker('SECRET', match.group('aws_access_key'))}"
+        if match.group("aws_secret_key") is not None:
+            return f"aws_secret_access_key={self._marker('SECRET', match.group('aws_secret_key'))}"
         return self._marker("SECRET", match.group(0))
 
 
