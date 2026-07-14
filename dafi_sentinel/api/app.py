@@ -25,6 +25,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from dafi_sentinel.api.auth import (
@@ -66,6 +69,15 @@ from dafi_sentinel.security.policy import SecurityGate
 DEFAULT_SWEEPER_INTERVAL_SECONDS = 60
 
 
+# PR-C.3 (R1 high#4): the security middleware ships with conservative
+# defaults so a misconfigured deploy cannot accidentally leave the
+# middleware disabled. The defaults match the values the 4R review
+# flagged as the production-readiness floor.
+DEFAULT_SECURITY_ALLOWED_HOSTS: tuple[str, ...] = ("localhost", "127.0.0.1")
+DEFAULT_SECURITY_CORS_ORIGINS: tuple[str, ...] = ()
+DEFAULT_HSTS_MAX_AGE_SECONDS = 60 * 60 * 24 * 365  # 1 year, conservative default
+
+
 def create_workbench_app(
     *,
     auth: AuthService,
@@ -75,6 +87,10 @@ def create_workbench_app(
     gate: SecurityGate | None = None,
     sweep_graph: Callable[[], Any] | None = None,
     sweeper_interval_seconds: float = DEFAULT_SWEEPER_INTERVAL_SECONDS,
+    enable_security_middleware: bool = False,
+    security_allowed_hosts: tuple[str, ...] = DEFAULT_SECURITY_ALLOWED_HOSTS,
+    security_cors_origins: tuple[str, ...] = DEFAULT_SECURITY_CORS_ORIGINS,
+    hsts_max_age_seconds: int = DEFAULT_HSTS_MAX_AGE_SECONDS,
 ) -> FastAPI:
     """Build the FastAPI app with the supplied services.
 
@@ -155,6 +171,49 @@ def create_workbench_app(
         ),
         lifespan=_lifespan,
     )
+
+    # PR-C.3 (R1 high#4): install the production-readiness middleware
+    # stack when the operator opts in. The middleware is OFF by default
+    # so the dev factory and the existing test suite keep working
+    # without changes; production deployments flip the flag (or set
+    # ``DAFI_PRODUCTION_POSTURE=1`` and use the canonical production
+    # factory the README documents).
+    if enable_security_middleware:
+        # HTTPSRedirect first: every request MUST arrive over TLS in
+        # production. TestClient runs over plain HTTP, so the redirect
+        # middleware will not fire in unit tests; the production
+        # uvicorn / gunicorn fronting the app must terminate TLS.
+        app.add_middleware(HTTPSRedirectMiddleware)
+        # TrustedHost next: reject requests whose ``Host`` header is
+        # not in the allow-list. The default is conservative
+        # (``localhost`` + ``127.0.0.1``) so a forgotten config does
+        # not silently open the surface.
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=list(security_allowed_hosts) or ["*"],
+        )
+        # CORS last so preflights consult the allow-list. Empty
+        # allow-list means "no cross-origin requests", which is the
+        # correct default for a server-to-server workbench API.
+        if security_cors_origins:
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=list(security_cors_origins),
+                allow_credentials=True,
+                allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                allow_headers=["Authorization", "Content-Type"],
+            )
+        # HSTS via a tiny custom middleware so the response header
+        # survives even when uvicorn terminates TLS upstream.
+        @app.middleware("http")
+        async def _hsts_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
+            response = await call_next(request)
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                f"max-age={hsts_max_age_seconds}; includeSubDomains",
+            )
+            return response
+
     app.state.auth = auth
     app.state.workbench = workbench
     app.state.gate = gate
