@@ -40,10 +40,10 @@ from typing import Annotated, Any, Literal, TypedDict, cast
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from dafi_sentinel.api.services import WorkbenchService, new_audit_id
-from dafi_sentinel.domain.models import ActorRef, AuditRecord, PolicyDecision, UserRef
+from dafi_sentinel.domain.models import ActorRef, AuditRecord, Permission, PolicyDecision, Role, UserRef
 from dafi_sentinel.security.policy import SecurityGate
 from dafi_sentinel.storage.contracts import AuditRepository
 
@@ -149,6 +149,8 @@ def build_investigation_graph(
     gate: SecurityGate,
     audits: AuditRepository,
     checkpointer: BaseCheckpointSaver | None = None,
+    paused_graph_ttl_seconds: int = 3600,
+    clock: Callable[[], datetime] | None = None,
 ) -> Any:
     """Compile and return the investigation state machine.
 
@@ -164,8 +166,15 @@ def build_investigation_graph(
        :class:`PolicyDecision` audit.
 
     The default checkpointer is an :class:`InMemorySaver` so the graph
-    can pause and resume in tests. Production deployments should swap
-    in a durable checkpointer (e.g., Postgres).
+    can pause and resume in tests. Production deployments MUST swap
+    in a durable checkpointer (e.g., Postgres); the module-level
+    logger warning makes the requirement visible at import time.
+
+    ``paused_graph_ttl_seconds`` is the orphan-handling TTL exposed
+    by the CRIT-6 fix. Operators run :func:`sweep_stale_pauses` against
+    the compiled graph with this TTL; stale paused threads are
+    finalized with ``decision_reason='approval-timeout'`` so the
+    audit trail captures abandoned investigations.
     """
 
     builder = StateGraph(InvestigationState)
@@ -345,11 +354,23 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
                 "audit_records": [_serialize_audit(record)],
             }
 
+        # The CRIT-6 sweeper resumes stale threads with the system
+        # approver. The system approver carries the approval:grant
+        # permission via its implicit role, so the authz check above
+        # passes. We detect the system path and set the decision
+        # reason to ``approval-timeout`` so the audit trail captures
+        # the abandonment.
+        is_timeout = approval.approver.id == _SYSTEM_APPROVER.id
+        decision_reason = (
+            "approval-timeout" if is_timeout
+            else (
+                f"approved-by-{approval.approver.id}" if approval.approved
+                else "approval-denied"
+            )
+        )
         decision = PolicyDecision(
-            allowed=approval.approved,
-            reason=(
-                f"approved-by-{approval.approver.id}" if approval.approved else "approval-denied"
-            ),
+            allowed=approval.approved and not is_timeout,
+            reason=decision_reason,
         )
         record = _build_audit_record(
             actor=approver_actor,
@@ -361,9 +382,9 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
         audits.write_audit(state["session_id"], record)
 
         return {
-            "approval_granted": approval.approved,
+            "approval_granted": approval.approved and not is_timeout,
             "approval_approver": approval.approver.id,
-            "decision_reason": decision.reason,
+            "decision_reason": decision_reason,
             "audit_records": [_serialize_audit(record)],
         }
 
@@ -573,4 +594,92 @@ __all__ = [
     "ApprovalRequest",
     "InvestigationState",
     "build_investigation_graph",
+    "sweep_stale_pauses",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Paused-graph TTL sweeper (CRIT-6)
+# --------------------------------------------------------------------------- #
+
+
+_SYSTEM_APPROVER = UserRef(
+    id="system",
+    display_name="System",
+    roles=(Role("system", permissions=(Permission(APPROVER_PERMISSION),)),),
+)
+
+
+def sweep_stale_pauses(
+    graph: Any,
+    *,
+    thread_ids: list[str],
+    ttl_seconds: int,
+    clock: Callable[[], datetime] | None = None,
+) -> int:
+    """Finalize paused graph threads older than ``ttl_seconds``.
+
+    The CRIT-6 fix addresses the orphan-handling gap in the default
+    :class:`InMemorySaver`: a paused investigation that nobody resumes
+    sits in the checkpointer forever. This sweeper scans the supplied
+    thread ids, identifies the ones that are still paused, compares
+    the pause timestamp against the TTL, and resumes the stale ones
+    with a denial decision so the finalize node records
+    ``approval-timeout`` and the audit trail captures the abandonment.
+
+    Returns the number of threads swept. Threads that are not paused
+    (already finalized, never started, or resumed) are skipped.
+    """
+    now = (clock or (lambda: datetime.now(UTC)))()
+    swept = 0
+    for thread_id in thread_ids:
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = graph.get_state(config)
+        if snapshot is None:
+            continue
+        # The thread is paused if the next node to run is the approval
+        # node (the snapshot carries the ``next`` channel when the
+        # graph is interrupted). If it's already finalized, skip.
+        if not snapshot.next:
+            continue
+        # Compare the checkpoint timestamp against the TTL. LangGraph
+        # stores ``created_at`` on each checkpoint tuple; the snapshot
+        # exposes it as ``snapshot.created_at``.
+        created_at = getattr(snapshot, "created_at", None)
+        if created_at is None:
+            # No timestamp available: be conservative and skip the
+            # thread rather than risk sweeping an active one.
+            continue
+        age_seconds = (now - _as_utc(created_at)).total_seconds()
+        if age_seconds < ttl_seconds:
+            continue
+        # Resume the thread with a denial. The approval node records
+        # the refusal as a system-level decision and the finalize node
+        # records the ``approval-timeout`` reason.
+        graph.invoke(
+            Command(
+                resume=ApprovalRequest(
+                    approved=False,
+                    approver=_SYSTEM_APPROVER,
+                ),
+            ),
+            config=config,
+        )
+        swept += 1
+    return swept
+
+
+def _as_utc(value: Any) -> datetime:
+    """Coerce a timestamp to a UTC ``datetime`` for arithmetic.
+
+    LangGraph checkpoints surface ``created_at`` as either a string
+    (ISO 8601) or a ``datetime`` depending on the serializer version.
+    Arithmetic against a timezone-aware ``now`` requires both sides
+    to be aware datetimes.
+    """
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

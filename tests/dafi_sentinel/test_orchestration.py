@@ -485,6 +485,104 @@ def test_orchestration_denies_approval_without_permission():
 
 
 # --------------------------------------------------------------------------- #
+# Paused-graph TTL sweeper (CRIT-6) — orphan handling
+# --------------------------------------------------------------------------- #
+
+
+def test_orchestration_sweeps_stale_paused_graphs_after_ttl():
+    """A paused graph older than the TTL is finalized with ``approval-timeout``.
+
+    The CRIT-6 fix addresses the orphan-handling gap: a paused
+    investigation that nobody resumes would otherwise sit in the
+    InMemorySaver forever. The sweeper resumes stale threads with a
+    denial decision so the finalize node writes the
+    ``approval-timeout`` audit reason and the operator can see which
+    investigations were abandoned.
+    """
+    import time
+
+    from dafi_sentinel.orchestration.graph import sweep_stale_pauses
+
+    workbench, gate, audits = _build_environment()
+    graph = build_investigation_graph(
+        workbench=workbench,
+        gate=gate,
+        audits=audits,
+    )
+
+    config = {"configurable": {"thread_id": "ttl-1"}}
+    initial = _initial_state()
+
+    # Pause the graph at the approval node.
+    paused = graph.invoke(initial, config=config)
+    assert "__interrupt__" in paused
+    assert graph.get_state(config) is not None
+
+    # The TTL is 0 seconds: the paused thread is immediately stale.
+    # The sweeper resumes it with a denial, the finalize node records
+    # ``approval-timeout``, and the chart is not rendered.
+    time.sleep(0.01)  # ensure the checkpoint timestamp is older than the TTL
+    swept = sweep_stale_pauses(
+        graph,
+        thread_ids=["ttl-1"],
+        ttl_seconds=0,
+    )
+    assert swept == 1, f"sweeper should sweep exactly the stale thread; got {swept}"
+
+    # The thread is now finalized; the snapshot shows the timeout
+    # reason in the decision.
+    snapshot = graph.get_state(config)
+    assert snapshot is not None
+    final_state = snapshot.values
+    assert final_state.get("chart_png") is None
+    assert final_state.get("decision_reason") == "approval-timeout"
+
+    # An audit record carries the timeout denial so reviewers can
+    # see which investigation was abandoned.
+    actions = [record["action"] for record in final_state["audit_records"]]
+    assert "orchestration.finalize" in actions
+
+
+def test_orchestration_sweeper_skips_fresh_paused_graphs():
+    """A paused graph within the TTL is NOT swept.
+
+    The sweeper must not finalize threads that are still inside their
+    TTL window; the operator only wants orphans, not in-flight
+    investigations. This test pins the contract.
+    """
+    from dafi_sentinel.orchestration.graph import sweep_stale_pauses
+
+    workbench, gate, audits = _build_environment()
+    graph = build_investigation_graph(
+        workbench=workbench,
+        gate=gate,
+        audits=audits,
+    )
+
+    config = {"configurable": {"thread_id": "fresh-1"}}
+    initial = _initial_state()
+
+    # Pause the graph.
+    paused = graph.invoke(initial, config=config)
+    assert "__interrupt__" in paused
+
+    # A 1-hour TTL leaves a freshly paused thread far inside the window.
+    swept = sweep_stale_pauses(
+        graph,
+        thread_ids=["fresh-1"],
+        ttl_seconds=3600,
+    )
+    assert swept == 0, f"fresh thread must not be swept; got {swept}"
+
+    # The thread is still paused.
+    snapshot = graph.get_state(config)
+    assert snapshot is not None
+    assert "__interrupt__" in snapshot.values or snapshot.next, (
+        "thread should remain paused after a no-op sweep"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Audit id uniqueness — re-execution must not collide (CRIT-5)
 # --------------------------------------------------------------------------- #
 
