@@ -5,7 +5,7 @@ initialized_at: 2026-07-14
 artifact_store: both
 
 context: |
-  DAFI Sentinel is a Python 3.13 package managed by uv.
+  DAFI Sentinel is a Python package managed by uv with Python 3.13 as the project target.
   PR1 is foundation-only: package skeleton, domain contracts, repository/retrieval ports, and pytest-based contract tests.
   Later slices may add infrastructure, APIs, UI, ML, and orchestration; PR1 must not introduce those implementations.
 
@@ -18,6 +18,7 @@ strict_tdd_evidence:
 testing:
   detected: 2026-07-14
   strict_tdd: true
+  runtime_observed: "uv run pytest used Python 3.14.6 while .python-version requests 3.13"
   primary_commands:
     - scope: dafi_sentinel
       command: "uv run pytest"
@@ -27,20 +28,20 @@ testing:
       available: true
       tools: [pytest]
     integration:
-      available: true
-      tools: [pytest]
+      available: false
+      tools: []
     e2e:
-      available: partial
+      available: false
       tools: []
   coverage:
-    available: true
+    available: false
     commands: []
   quality:
     linter:
-      available: partial
+      available: false
       commands: []
     type_checker:
-      available: partial
+      available: false
       commands: []
     formatter:
       available: false

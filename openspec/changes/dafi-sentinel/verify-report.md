@@ -1,119 +1,50 @@
-# Verification Report: DAFI Sentinel PR1 Foundation Final Re-verify
+# Verification Report: DAFI Sentinel PR2 Gatekeeper
 
 **Change**: `dafi-sentinel`
-**Project**: `projects`
-**Slice**: PR1 Foundation only, after user-authorized micro-remediation
+**Project**: `dafi-sentinel`
+**Slice**: PR2 tasks 2.1, 2.1a, 2.2 only
 **Mode**: Strict TDD
-**Artifact store**: both
 **Verdict**: PASS
-
-## Summary
-
-PR1 Foundation is ready. `uv run pytest` passes with 6 tests, the apparent PR1 review-budget count is 391 lines including `.gitignore`, `.python-version`, and `openspec/changes/dafi-sentinel/tasks.md`, and OpenSpec/Engram task artifacts are synced.
 
 ## Runtime Evidence
 
 | Command | Result | Evidence |
 |---|---:|---|
-| `uv run pytest` | ✅ Pass | 6 tests collected; 6 passed in 0.03s. |
+| `uv run pytest` | PASS | 15 tests collected; 15 passed in 0.07s. Runtime observed Python 3.14.6. |
 
-## Completeness
-
-| Check | Result | Evidence |
-|---|---:|---|
-| PR1 tasks checked in OpenSpec | ✅ Pass | `openspec/changes/dafi-sentinel/tasks.md` has PR1 items 1.1-1.10 checked. |
-| Engram tasks synced | ✅ Pass | Engram `sdd/dafi-sentinel/tasks` matches the remediated OpenSpec task state, including PR1 391-line forecast and deferred standalone fixtures. |
-| Apply-progress reflects completion | ✅ Pass | Engram `sdd/dafi-sentinel/apply-progress` records completed PR1 tasks, micro-remediation, TDD evidence, and 391-line verification. |
-| PR1 changed lines within 400 | ✅ Pass | Apparent PR1 files total 391 lines, including `.gitignore`, `.python-version`, and `tasks.md`. |
-
-## Review Budget Evidence
-
-| File | Lines |
-|---|---:|
-| `.gitignore` | 10 |
-| `.python-version` | 1 |
-| `README.md` | 13 |
-| `pyproject.toml` | 16 |
-| `uv.lock` | 79 |
-| `dafi_sentinel/__init__.py` | 1 |
-| `dafi_sentinel/domain/models.py` | 98 |
-| `dafi_sentinel/retrieval/contracts.py` | 27 |
-| `dafi_sentinel/storage/contracts.py` | 19 |
-| `tests/dafi_sentinel/test_foundation_contracts.py` | 60 |
-| `tests/dafi_sentinel/test_pr1_no_external_infra.py` | 31 |
-| `openspec/changes/dafi-sentinel/tasks.md` | 36 |
-| **Total** | **391** |
-
-## README Scope Check
+## Gate Checks
 
 | Check | Result | Evidence |
 |---|---:|---|
-| Grafana/Prometheus scope unambiguous | ✅ Pass | README states: “Grafana and Prometheus are out of scope for this product.” |
-| Later-slice boundary clear | ✅ Pass | README separates PR1 foundation from later PostgreSQL/pgvector, Podman, FastAPI, React, auth implementation, LangGraph, and scikit-learn work. |
+| Apply claims | PASS | Engram `sdd/dafi-sentinel/apply-progress` reports PR2 success, files changed, risks/deviations, next remaining PR3-PR6 tasks, and Strict TDD evidence. |
+| Artifact existence | PASS | Claimed PR2 files are present/readable: ingestion/security packages, two PR2 test files, fixture corpus, and `tasks.md`. |
+| No hallucinated paths/symbols | PASS | Referenced symbols exist: `ingest_incident_dataset`, `DatasetValidationError`, `InMemoryIncidentStore`, `RedactionService`, `SecurityGate`, `Approval`, `AuditSink`. |
+| No PR3+ drift | PASS | No `infra/`, `frontend/`, `dafi_sentinel/api/`; no FastAPI, pgvector, psycopg, scikit-learn, matplotlib, LangGraph dependencies or implementation. |
+| Task coherence | PASS | Only 2.1, 2.1a, 2.2 are checked after PR1; PR3, PR4, PR5, and PR6 remain unchecked. |
+| Review budget | PASS | PR2-owned changed lines: 356 new file lines + 6 task checkbox diff lines = 362, under 400. Prior `.gitignore`/`openspec/config.yaml` init edits are separable. |
 
-## Explicit PR1 Exclusions
+## Spec Coverage
 
-| Exclusion | Result | Evidence |
-|---|---:|---|
-| No PostgreSQL/pgvector implementation or dependency | ✅ Pass | Root `pyproject.toml` has no runtime dependencies; root `uv.lock` contains only pytest tooling; no DB adapter exists. |
-| No Podman compose | ✅ Pass | No `infra/` PR1 files exist. |
-| No FastAPI | ✅ Pass | No API package or dependency exists. |
-| No frontend | ✅ Pass | No `frontend/` PR1 files exist. |
-| No LangGraph | ✅ Pass | No implementation or dependency exists. |
-| No auth middleware/login/tokens | ✅ Pass | Only minimal identity/authorization contracts exist: `ActorRef`, `UserRef`, `Role`, and `Permission`. |
-| No Grafana/Prometheus | ✅ Pass | No implementation or dependency exists; README marks both out of scope. |
-| No scikit-learn | ✅ Pass | No implementation or dependency exists. |
+| Requirement / Scenario | Runtime Evidence | Status |
+|---|---|---:|
+| Ingest seeded dataset with stable IDs and repeatable timeline | `test_valid_dataset_ingests_stable_timeline_and_evidence_ids` | PASS |
+| Reject malformed row and avoid partial state | `test_malformed_row_reports_structured_error_and_rolls_back_state` | PASS |
+| Preserve source reference and redaction handoff | `test_source_traceability_and_redaction_handoff_are_preserved` | PASS |
+| Treat prompt injection as data | `test_prompt_injection_in_evidence_is_data_and_does_not_change_policy` | PASS |
+| Refuse policy bypass requests | `test_user_policy_bypass_request_is_refused_with_permission_boundary` | PASS |
+| Redact secrets/PII with stable markers | `test_redaction_replaces_tokens_credentials_and_personal_identifiers_with_stable_markers` | PASS |
+| Enforce role permissions, approvals, and audit decisions | `test_role_based_tool_authorization_approvals_and_audits` | PASS |
+| Standalone runbook fixture coverage | `test_standalone_runbook_fixture_can_be_indexed_by_existing_retrieval_contract` | PASS |
 
-## TDD Compliance
+## Strict TDD Compliance
 
 | Check | Result | Details |
 |---|---:|---|
-| TDD Evidence reported | ✅ | Found in Engram `sdd/dafi-sentinel/apply-progress`. |
-| All PR1 tasks have tests | ✅ | `tests/dafi_sentinel/test_foundation_contracts.py` and `tests/dafi_sentinel/test_pr1_no_external_infra.py` exist. |
-| RED confirmed | ✅ | Test files exist and cover contract/guard behavior. |
-| GREEN confirmed | ✅ | `uv run pytest` passes now. |
-| Triangulation adequate | ✅ | Stable evidence, audit/chart, empty retrieval, fixture retrieval, and forbidden-infra guards are covered. |
-| Safety net for modified files | ✅ | Apply-progress reports 6/6 baseline before remediation edits. |
-
-**TDD Compliance**: 6/6 checks passed.
-
-## Test Layer Distribution
-
-| Layer | Tests | Files | Tools |
-|---|---:|---:|---|
-| Unit/config guard | 6 | 2 | pytest |
-| Integration | 0 | 0 | Not installed |
-| E2E | 0 | 0 | Not installed |
-| **Total** | **6** | **2** | |
-
-## Changed File Coverage
-
-Coverage analysis skipped — no coverage tool detected.
-
-## Assertion Quality
-
-**Assertion quality**: ✅ All assertions verify real behavior. The empty retrieval assertion has a companion non-empty retrieval assertion in the same test.
-
-## Quality Metrics
-
-**Linter**: ➖ Not available.
-**Type Checker**: ➖ Not available.
-
-## Spec Compliance Matrix
-
-| Capability / Scenario | PR1 Expected Scope | Runtime Evidence | Status |
-|---|---|---|---:|
-| Incident ingestion / stable evidence IDs | Contract only | `test_evidence_ids_are_stable_and_source_metadata_is_preserved` | ✅ Compliant for PR1 |
-| Investigation workbench / chart specs | Contract only | `test_audit_records_keep_actor_attribution_policy_and_chart_shape` | ✅ Compliant for PR1 |
-| Security Agent / auth attribution | Minimal contracts only | `test_audit_records_keep_actor_attribution_policy_and_chart_shape`; no auth middleware files | ✅ Compliant for PR1 |
-| RAG retrieval / foundation without DB | In-memory port only | `test_retrieval_contract_returns_empty_and_fixture_document_results`; no infra guard tests | ✅ Compliant for PR1 |
-| ML incident analysis | Later slice only | No scikit-learn dependency or implementation | ✅ Compliant for PR1 |
-
-## Artifact Hygiene
-
-| Check | Result | Evidence |
-|---|---:|---|
-| Non-venv `__pycache__` artifacts | ✅ Pass | None found after verification cleanup. |
+| TDD evidence reported | PASS | Found in `sdd/dafi-sentinel/apply-progress`. |
+| RED confirmed | PASS | PR2 test files exist and target modules now exist. Reported RED was missing package collection failures before implementation. |
+| GREEN confirmed | PASS | Full suite passes now. |
+| Triangulation adequate | PASS | 8 PR2 unit tests cover different ingestion/security/fixture paths. |
+| Assertion quality | PASS | No tautologies, ghost loops, production-free assertions, or smoke-only assertions found. |
 
 ## Issues
 
@@ -123,12 +54,9 @@ Coverage analysis skipped — no coverage tool detected.
 
 ### WARNING
 
-- The repository has no commits and broad unrelated untracked directories exist, so review-budget verification used explicit apparent PR1 file accounting instead of a conventional tracked PR diff.
-
-### SUGGESTION
-
-- Keep PR1 committed as its own stacked slice before starting PR2 so the 391-line review boundary remains reviewable.
+- No coverage/linter/type-checker tooling is available; skipped per Strict TDD verify rules.
+- Existing `openspec/config.yaml` and `.gitignore` modifications are prior init/config drift, not PR2-owned, and should remain separable for review accounting.
 
 ## Final Verdict
 
-PASS — PR1 Foundation meets runtime, TDD, artifact-sync, review-budget, documentation scope, hygiene, and explicit exclusion gates.
+PASS — PR2 tasks 2.1, 2.1a, and 2.2 conform to specs, stay inside the PR2 boundary, pass runtime verification, and remain under the 400-line review budget.
