@@ -20,7 +20,7 @@ export function LoginPage() {
   }
   if (session) {
     const state = (location.state ?? null) as LocationState | null;
-    const target = state?.from?.pathname ?? "/protected";
+    const target = state?.from?.pathname ?? "/evidence";
     return <Navigate to={target} replace />;
   }
 
@@ -31,7 +31,7 @@ export function LoginPage() {
     try {
       await login(username, password);
       const state = (location.state ?? null) as LocationState | null;
-      const target = state?.from?.pathname ?? "/protected";
+      const target = state?.from?.pathname ?? "/evidence";
       navigate(target, { replace: true });
     } catch (caught) {
       if (caught instanceof ApiError) {

@@ -68,7 +68,7 @@ describe("auth gate", () => {
     vi.stubGlobal("fetch", fetchStub);
 
     const queryClient = makeQueryClient();
-    renderApp("/protected", queryClient);
+    renderApp("/evidence", queryClient);
 
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /sign in/i })).toBeInTheDocument();
@@ -88,14 +88,15 @@ describe("auth gate", () => {
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "GET /evidence": () => new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } }),
     });
     vi.stubGlobal("fetch", fetchStub);
 
     const queryClient = makeQueryClient();
-    renderApp("/protected", queryClient);
+    renderApp("/evidence", queryClient);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /protected/i })).toBeInTheDocument();
+      expect(screen.getByText(/no evidence yet for this account/i)).toBeInTheDocument();
     });
   });
 
@@ -121,6 +122,7 @@ describe("auth gate", () => {
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
+      "GET /evidence": () => new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } }),
     });
     vi.stubGlobal("fetch", fetchStub);
 
@@ -136,7 +138,7 @@ describe("auth gate", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /protected/i })).toBeInTheDocument();
+      expect(screen.getByText(/no evidence yet for this account/i)).toBeInTheDocument();
     });
     expect(window.localStorage.getItem("dafi-sentinel:session")).toContain("tok-1");
   });
