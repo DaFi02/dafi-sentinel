@@ -34,6 +34,7 @@ from dafi_sentinel.domain.models import (
     UserRef,
 )
 from dafi_sentinel.orchestration.graph import (
+    APPROVER_PERMISSION,
     ApprovalRequest,
     InvestigationState,
     build_investigation_graph,
@@ -111,13 +112,27 @@ def _initial_state(
     }
 
 
+def _approver_user_ref(*, with_permission: bool = True) -> UserRef:
+    """Build a UserRef carrying the approver role.
+
+    The CRIT-2 fix requires the approver to be a separate user with the
+    ``approval:grant`` permission. ``with_permission=False`` seeds the
+    same user id without the permission so the test for the
+    unauthorized-approver path can reuse the helper.
+    """
+    roles: tuple[Role, ...] = (
+        Role("approver", permissions=(Permission(APPROVER_PERMISSION),)),
+    ) if with_permission else (Role("unprivileged", permissions=()),)
+    return UserRef(id="user-2", display_name="Other", roles=roles)
+
+
 def _run_with_approval(
     graph: Any,
     config: dict[str, Any],
     initial: InvestigationState,
     *,
     approved: bool,
-    approver_id: str = "user-1",
+    approver: UserRef | None = None,
 ) -> dict[str, Any]:
     """Drive the graph to completion (or denial) and return the final state.
 
@@ -131,16 +146,22 @@ def _run_with_approval(
     the chart is absent. If the question has no supporting evidence,
     the graph skips the approval step entirely and the first invoke
     returns the final state without an interrupt.
+
+    The CRIT-2 fix changed the resume value from a bare ``approver_id``
+    to a full ``UserRef``; the default approver is a distinct user with
+    the ``approval:grant`` permission so the happy path is always a
+    real human approver, not a self-approval.
     """
     first = graph.invoke(initial, config=config)
     if "__interrupt__" not in first:
         # Graph ran end-to-end without an approval pause.
         return cast(dict[str, Any], first)
 
+    approver_ref = approver if approver is not None else _approver_user_ref()
     return cast(
         dict[str, Any],
         graph.invoke(
-            Command(resume=ApprovalRequest(approved=approved, approver_id=approver_id)),
+            Command(resume=ApprovalRequest(approved=approved, approver=approver_ref)),
             config=config,
         ),
     )
@@ -176,9 +197,12 @@ def test_happy_path_runs_every_node_and_captures_final_state():
     assert final["chart_png"].startswith(b"\x89PNG")
 
     # The approval was recorded and propagated to the finalize audit.
+    # The CRIT-2 fix requires a distinct human approver (user-2 by
+    # default in the test helper) with the ``approval:grant``
+    # permission; the approver id is propagated to the finalize node.
     assert final["approval_granted"] is True
-    assert final["approval_approver"] == "user-1"
-    assert final["decision_reason"] == "approved-by-user-1"
+    assert final["approval_approver"] == "user-2"
+    assert final["decision_reason"] == "approved-by-user-2"
 
 
 # --------------------------------------------------------------------------- #
@@ -228,12 +252,15 @@ def test_approval_denial_records_policy_decision_and_skips_chart_render():
         audits=audits,
     )
 
+    # The CRIT-2 fix requires a distinct approver with the
+    # ``approval:grant`` permission. The denial scenario uses the
+    # default approver (user-2 with the approver role) and refuses
+    # the controlled action.
     final = _run_with_approval(
         graph,
         config={"configurable": {"thread_id": "deny-1"}},
         initial=_initial_state(session_id="session-deny"),
         approved=False,
-        approver_id="user-1",
     )
 
     # The denial path skips the chart render and routes to finalize.
@@ -310,10 +337,22 @@ def test_every_stateful_node_writes_an_audit_record():
     assert "orchestration.render_chart" in actions
     assert "orchestration.finalize" in actions
 
-    # Each audit record is actor-attributed (per security-agent spec).
+    # The CRIT-2 fix routes the approval audit through the separate
+    # approver (user-2) so the trail of who granted the controlled
+    # action is attributable to a distinct human. The other stateful
+    # actions (inspect, retrieve, render_chart, finalize) are still
+    # attributed to the requestor (user-1).
+    by_action: dict[str, list[dict[str, Any]]] = {}
     for record in final["audit_records"]:
-        assert record["actor_id"] == "user-1"
-        assert "user-1" in record["role_context"]
+        by_action.setdefault(record["action"], []).append(record)
+
+    for action in ("orchestration.inspect", "orchestration.retrieve", "orchestration.render_chart", "orchestration.finalize"):
+        for record in by_action.get(action, ()):
+            assert record["actor_id"] == "user-1", f"{action} must be attributed to the requestor"
+    for record in by_action.get("orchestration.approval", ()):
+        assert record["actor_id"] == "user-2", (
+            "orchestration.approval must be attributed to the approver, not the requestor"
+        )
 
 
 def test_orchestration_state_is_typed_and_total_false():
@@ -325,6 +364,124 @@ def test_orchestration_state_is_typed_and_total_false():
     assert "decision_reason" in annotations
     assert "chart_png" in annotations
     assert "audit_records" in annotations
+
+
+# --------------------------------------------------------------------------- #
+# Approver authorization (CRIT-2) — separation of duties + permission check
+# --------------------------------------------------------------------------- #
+
+
+def test_orchestration_approval_audit_attributes_actor_to_approver_not_requester():
+    """The approval audit record's actor is the approver, not the requestor.
+
+    The CRIT-2 fix routes the approval audit through the approver so
+    the trail of who granted (or attempted to grant) the controlled
+    action is attributable to a separate human. Without this, a
+    requestor could self-approve and still show up as the actor of the
+    approval record, defeating the separation-of-duties invariant.
+    """
+    workbench, gate, audits = _build_environment()
+    graph = build_investigation_graph(
+        workbench=workbench,
+        gate=gate,
+        audits=audits,
+    )
+
+    final = _run_with_approval(
+        graph,
+        config={"configurable": {"thread_id": "approver-actor"}},
+        initial=_initial_state(),
+        approved=True,
+    )
+
+    approval_audits = [r for r in final["audit_records"] if r["action"] == "orchestration.approval"]
+    assert approval_audits, "the approval node must write an audit record"
+    # The approver audit actor is the separate human approver (user-2),
+    # NOT the requestor (user-1). Other audits still attribute the
+    # requestor as the actor (inspect, retrieve, render_chart, finalize).
+    assert approval_audits[0]["actor_id"] == "user-2"
+
+
+def test_orchestration_denies_self_approval():
+    """A requestor cannot approve their own request.
+
+    The CRIT-2 fix (separation of duties) refuses the approval when the
+    resume value identifies the requestor as the approver. The graph
+    records the refusal as ``approval-self-or-unauthorized`` and skips
+    the chart render.
+    """
+    workbench, gate, audits = _build_environment()
+    graph = build_investigation_graph(
+        workbench=workbench,
+        gate=gate,
+        audits=audits,
+    )
+
+    # The requestor is user-1 (set by _initial_state); the approver is
+    # the same user with the approval:grant permission. The graph MUST
+    # refuse this combination.
+    self_approver = UserRef(
+        id="user-1",
+        display_name="Self",
+        roles=(Role("approver", permissions=(Permission(APPROVER_PERMISSION),)),),
+    )
+    final = _run_with_approval(
+        graph,
+        config={"configurable": {"thread_id": "self-approve"}},
+        initial=_initial_state(),
+        approved=True,
+        approver=self_approver,
+    )
+
+    # The chart was not rendered because the approval was refused.
+    assert final.get("chart_png") is None
+    assert final["approval_granted"] is False
+    assert final["decision_reason"] == "approval-self-or-unauthorized"
+
+    # The audit trail carries the refusal decision so a reviewer can
+    # see who tried to self-approve.
+    approval_audits = [r for r in final["audit_records"] if r["action"] == "orchestration.approval"]
+    assert approval_audits
+    decision = approval_audits[0]["decision"]
+    assert decision["allowed"] is False
+    assert decision["reason"] == "approval-self-or-unauthorized"
+
+
+def test_orchestration_denies_approval_without_permission():
+    """An approver without ``approval:grant`` is refused.
+
+    The CRIT-2 fix also requires the approver to carry the
+    ``approval:grant`` permission. A separate user without the
+    permission is refused with the same audit reason
+    ``approval-self-or-unauthorized``; this is the second half of the
+    separation-of-duties check (identity AND permission).
+    """
+    workbench, gate, audits = _build_environment()
+    graph = build_investigation_graph(
+        workbench=workbench,
+        gate=gate,
+        audits=audits,
+    )
+
+    # user-2 exists but without the approver role/permission.
+    unprivileged_approver = _approver_user_ref(with_permission=False)
+    final = _run_with_approval(
+        graph,
+        config={"configurable": {"thread_id": "no-perm"}},
+        initial=_initial_state(),
+        approved=True,
+        approver=unprivileged_approver,
+    )
+
+    assert final.get("chart_png") is None
+    assert final["approval_granted"] is False
+    assert final["decision_reason"] == "approval-self-or-unauthorized"
+
+    approval_audits = [r for r in final["audit_records"] if r["action"] == "orchestration.approval"]
+    assert approval_audits
+    decision = approval_audits[0]["decision"]
+    assert decision["allowed"] is False
+    assert decision["reason"] == "approval-self-or-unauthorized"
 
 
 # --------------------------------------------------------------------------- #

@@ -43,9 +43,38 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from dafi_sentinel.api.services import WorkbenchService, new_audit_id
-from dafi_sentinel.domain.models import ActorRef, AuditRecord, PolicyDecision
+from dafi_sentinel.domain.models import ActorRef, AuditRecord, PolicyDecision, UserRef
 from dafi_sentinel.security.policy import SecurityGate
 from dafi_sentinel.storage.contracts import AuditRepository
+
+
+# --------------------------------------------------------------------------- #
+# Module-level guard
+# --------------------------------------------------------------------------- #
+
+import logging
+
+logger = logging.getLogger(__name__)
+# The default InMemorySaver is process-local; production deployments MUST
+# swap in a durable checkpointer (e.g., Postgres). Surfacing the warning
+# at import time makes the requirement visible to operators.
+logger.warning(
+    "InMemorySaver is process-local; production must use a durable checkpointer (e.g., Postgres)."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Approver authorization
+# --------------------------------------------------------------------------- #
+
+
+APPROVER_PERMISSION = "approval:grant"
+"""Permission required for a user to grant an approval.
+
+The CRIT-2 fix enforces this permission on the approver (not just
+separation of duties) so a low-privilege user cannot grant controlled
+actions.
+"""
 
 
 # --------------------------------------------------------------------------- #
@@ -98,10 +127,15 @@ class ApprovalRequest:
     The approval node calls :func:`langgraph.types.interrupt` with this
     shape; a separate approval step (test helper or CLI) resumes the
     graph with an :class:`ApprovalRequest` instance.
+
+    The CRIT-2 fix changed the resume value from a bare ``approver_id``
+    to a full :class:`UserRef` so the graph can enforce separation of
+    duties and the ``approval:grant`` permission without a side
+    user-store lookup.
     """
 
     approved: bool
-    approver_id: str = ""
+    approver: UserRef | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -255,7 +289,7 @@ def _make_compose_node() -> Callable[[InvestigationState], dict[str, Any]]:
 
 def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
     def request_approval(state: InvestigationState) -> dict[str, Any]:
-        actor = _actor(state)
+        requestor_id = state.get("actor_id") or ""
         # Pause execution and surface the approval prompt to the caller.
         # The caller resumes the graph with ``Command(resume=ApprovalRequest(...))``.
         resume_value = interrupt(
@@ -267,24 +301,68 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
         )
         approval = _coerce_approval(resume_value)
 
+        # CRIT-2: enforce separation of duties and the approval:grant
+        # permission on the approver. Without an approver, the resume
+        # is also treated as a denial.
+        if approval.approver is None:
+            decision = PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
+            record = _build_audit_record(
+                actor=ActorRef(id=requestor_id, kind="user"),
+                action="orchestration.approval",
+                decision=decision,
+                session_id=state["session_id"],
+                role_context=(state.get("owner_id") or "",),
+            )
+            audits.write_audit(state["session_id"], record)
+            return {
+                "approval_granted": False,
+                "approval_approver": "",
+                "decision_reason": decision.reason,
+                "audit_records": [_serialize_audit(record)],
+            }
+
+        authz = _evaluate_approver(requestor_id=requestor_id, approver=approval.approver)
+        approver_actor = ActorRef(id=approval.approver.id, kind="user")
+        approver_role_context = tuple(role.name for role in approval.approver.roles)
+
+        if not authz.allowed:
+            # The approver is the requestor (separation of duties) or
+            # does not carry the approval:grant permission. The audit
+            # trail is still attributed to the approver so reviewers
+            # can see who attempted the unauthorized grant.
+            record = _build_audit_record(
+                actor=approver_actor,
+                action="orchestration.approval",
+                decision=authz,
+                session_id=state["session_id"],
+                role_context=approver_role_context,
+            )
+            audits.write_audit(state["session_id"], record)
+            return {
+                "approval_granted": False,
+                "approval_approver": approval.approver.id,
+                "decision_reason": authz.reason,
+                "audit_records": [_serialize_audit(record)],
+            }
+
         decision = PolicyDecision(
             allowed=approval.approved,
             reason=(
-                f"approved-by-{approval.approver_id}" if approval.approved else "approval-denied"
+                f"approved-by-{approval.approver.id}" if approval.approved else "approval-denied"
             ),
         )
         record = _build_audit_record(
-            actor=actor,
+            actor=approver_actor,
             action="orchestration.approval",
             decision=decision,
             session_id=state["session_id"],
-            role_context=(state.get("owner_id") or "",),
+            role_context=approver_role_context,
         )
         audits.write_audit(state["session_id"], record)
 
         return {
             "approval_granted": approval.approved,
-            "approval_approver": approval.approver_id,
+            "approval_approver": approval.approver.id,
             "decision_reason": decision.reason,
             "audit_records": [_serialize_audit(record)],
         }
@@ -396,15 +474,53 @@ def _make_finalize_node(audits: AuditRepository) -> Callable[[InvestigationState
 
 
 def _coerce_approval(value: Any) -> ApprovalRequest:
-    """Coerce the resume value (which round-trips through pickle) into an :class:`ApprovalRequest`."""
+    """Coerce the resume value (which round-trips through pickle) into an :class:`ApprovalRequest`.
+
+    The CRIT-2 fix expects the approver as a :class:`UserRef` (not a
+    bare id). The helper still tolerates the prior ``approver_id`` shape
+    for backward compatibility with older test fixtures, but treats a
+    missing approver as a self/unauthorized denial downstream.
+    """
     if isinstance(value, ApprovalRequest):
         return value
     if isinstance(value, dict):
-        return ApprovalRequest(
-            approved=bool(value.get("approved", False)),
-            approver_id=str(value.get("approver_id") or ""),
-        )
-    return ApprovalRequest(approved=False, approver_id="")
+        approver_value = value.get("approver")
+        approver: UserRef | None
+        if isinstance(approver_value, UserRef):
+            approver = approver_value
+        elif isinstance(approver_value, dict):
+            approver = UserRef(
+                id=str(approver_value.get("id") or ""),
+                display_name=str(approver_value.get("display_name") or ""),
+                roles=approver_value.get("roles") or (),
+            )
+        else:
+            # Fallback for older fixtures: a bare approver_id string.
+            legacy_id = str(value.get("approver_id") or "")
+            approver = (
+                UserRef(id=legacy_id, display_name=legacy_id, roles=())
+                if legacy_id
+                else None
+            )
+        return ApprovalRequest(approved=bool(value.get("approved", False)), approver=approver)
+    return ApprovalRequest(approved=False, approver=None)
+
+
+def _evaluate_approver(*, requestor_id: str, approver: UserRef) -> PolicyDecision:
+    """Approve the approver identity (separation of duties + permission).
+
+    Returns a :class:`PolicyDecision` whose ``allowed`` flag tells the
+    approval node whether to proceed. The reason is set to
+    ``approval-self-or-unauthorized`` on both the self-approval and
+    missing-permission paths because the public surface treats them as
+    a single refusal (and the audit role_context + actor reveal which
+    case fired).
+    """
+    if approver.id == requestor_id:
+        return PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
+    if not any(role.allows(APPROVER_PERMISSION) for role in approver.roles):
+        return PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
+    return PolicyDecision(allowed=True, reason="approval-authorized")
 
 
 def _build_audit_record(
@@ -453,6 +569,7 @@ def _serialize_audit(record: AuditRecord) -> dict[str, Any]:
 
 
 __all__ = [
+    "APPROVER_PERMISSION",
     "ApprovalRequest",
     "InvestigationState",
     "build_investigation_graph",
