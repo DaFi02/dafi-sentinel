@@ -367,6 +367,12 @@ def default_workbench_app() -> FastAPI:
     Used by ``uvicorn dafi_sentinel.api.app:default_workbench_app`` in
     local development. Tests build their own app via
     :func:`create_workbench_app`.
+
+    The factory disables ``cookie_secure`` (browsers reject Secure cookies
+    over the HTTP dev server) and gates the dashboard dev server CSP via
+    the ``DAFI_DEV_NO_CSP_META=1`` env var so Vite HMR inline scripts are
+    not blocked. Production deployments must use HTTPS and keep the strict
+    meta-CSP — see :func:`create_workbench_app` for the production defaults.
     """
     from dafi_sentinel.api.auth import AuthService, InMemorySessionStore, InMemoryUserStore
     from dafi_sentinel.domain.models import Permission, Role
@@ -387,6 +393,7 @@ def default_workbench_app() -> FastAPI:
     return create_workbench_app(
         auth=AuthService(users=users, sessions=InMemorySessionStore()),
         workbench=workbench,
+        cookie_secure=False,
     )
 
 
