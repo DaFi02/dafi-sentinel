@@ -5,11 +5,17 @@ description = "Foundation contracts for DAFI Sentinel."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.139.0",
+    "itsdangerous>=2.2.0",
     "matplotlib>=3.11.0",
     "numpy>=2.5.1",
+    "passlib[argon2]>=1.7.4",
     "pgvector>=0.3",
     "psycopg[binary]>=3.2",
+    "pydantic>=2.13.4",
+    "python-multipart>=0.0.32",
     "scikit-learn>=1.9.0",
+    "uvicorn[standard]>=0.51.0",
 ]
 
 [dependency-groups]

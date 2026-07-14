@@ -8,13 +8,14 @@ matters for every PR after foundation:
   or any external service. The pgvector smoke is opt-in via
   ``DAFI_PGVECTOR_SMOKE=1``.
 * PR3 ships ``infra/podman/``; PR4 ships ``dafi_sentinel/ml/`` and
-  ``dafi_sentinel/charts/``; PR5 will ship the React dashboard, FastAPI,
-  and auth middleware; PR6 will ship LangGraph orchestration. The forbidden
+  ``dafi_sentinel/charts/``; PR5 ships the React dashboard, FastAPI, and
+  auth middleware; PR6 will ship LangGraph orchestration. The forbidden
   modules/paths block those later slices from leaking into earlier PRs.
-* The runtime imports pulled in by the unit suite must not include
-  api/dashboard/auth/middleware/orchestration modules.
+* The runtime imports pulled in by the unit suite must not include the
+  PR6 orchestration surface.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -29,9 +30,10 @@ def test_unit_suite_does_not_require_live_postgres_or_podman():
     import dafi_sentinel.retrieval.contracts  # noqa: F401
     import dafi_sentinel.storage.contracts  # noqa: F401
 
-    # PR4 (ML/charts) makes scikit-learn/numpy/matplotlib a runtime dependency.
-    # The forbidden list still blocks PR5 (FastAPI/React/auth) and PR6 (LangGraph).
-    forbidden_modules = {"fastapi", "langgraph", "prometheus_client"}
+    # PR5 ships the FastAPI auth/session middleware and the React dashboard.
+    # The forbidden list still blocks PR6 (LangGraph) and any third-party
+    # observability stack (Grafana/Prometheus clients).
+    forbidden_modules = {"langgraph", "prometheus_client"}
 
     assert forbidden_modules.isdisjoint(sys.modules)
     assert dafi_sentinel.__version__ == "0.1.0"
@@ -56,37 +58,61 @@ def test_pgvector_smoke_is_opt_in_and_skipped_by_default():
     assert "DAFI_PGVECTOR_SMOKE" in proc.stdout
 
 
-def test_pr4_owns_ml_and_charts_but_not_frontend_api_auth_or_langgraph():
-    """PR4 ships ``dafi_sentinel/ml/`` and ``dafi_sentinel/charts/``; PR5/PR6 paths stay out."""
+def test_pr5_owns_api_and_frontend_but_not_langgraph_or_orchestration():
+    """PR5 ships ``dafi_sentinel/api/`` and ``frontend/``; PR6 paths stay out."""
     project_root = Path(__file__).resolve().parents[2]
 
     present_paths = {
         "infra/podman": project_root / "infra" / "podman",
         "dafi_sentinel/ml": project_root / "dafi_sentinel" / "ml",
         "dafi_sentinel/charts": project_root / "dafi_sentinel" / "charts",
+        "dafi_sentinel/api": project_root / "dafi_sentinel" / "api",
+        "frontend": project_root / "frontend",
     }
     forbidden_paths = {
-        "frontend": project_root / "frontend",
-        "dafi_sentinel/api": project_root / "dafi_sentinel" / "api",
-        "dafi_sentinel/auth": project_root / "dafi_sentinel" / "auth",
-        "dafi_sentinel/security/middleware": project_root / "dafi_sentinel" / "security" / "middleware.py",
         "dafi_sentinel/orchestration": project_root / "dafi_sentinel" / "orchestration",
+        "dafi_sentinel/auth/middleware.py": project_root / "dafi_sentinel" / "auth" / "middleware.py",
     }
 
     assert all(path.exists() for path in present_paths.values())
     assert not any(path.exists() for path in forbidden_paths.values())
 
 
-def test_pyproject_keeps_frontend_api_auth_langgraph_out_of_pr4():
-    """PR4 adds scikit-learn/numpy/matplotlib but still excludes PR5/PR6 surface."""
+def test_pyproject_keeps_langgraph_out_of_pr5():
+    """PR5 adds FastAPI/auth helpers but still excludes PR6 LangGraph surface."""
     pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
     content = pyproject.read_text(encoding="utf-8").lower()
 
-    for forbidden in ("fastapi", "react", "langgraph"):
-        assert forbidden not in content, f"{forbidden} must not be added in PR4"
+    assert "langgraph" not in content, "langgraph must not be added in PR5"
 
-    for required in ("scikit-learn", "numpy", "matplotlib"):
-        assert required in content, f"{required} must be declared in PR4"
+    for required in (
+        "fastapi",
+        "uvicorn",
+        "pydantic",
+        "itsdangerous",
+        "passlib",
+    ):
+        assert required in content, f"{required} must be declared in PR5"
 
-    assert "psycopg" in content
-    assert "pgvector" in content
+    # Earlier slices must remain present (boundary regression guard).
+    for required in ("scikit-learn", "numpy", "matplotlib", "psycopg", "pgvector"):
+        assert required in content, f"{required} must still be declared (regression)"
+
+
+def test_frontend_package_manifest_blocks_langgraph():
+    """PR5 frontend manifest must not depend on LangGraph or observability clients."""
+    package_json = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
+    if not package_json.exists():
+        # The frontend has not been scaffolded yet in this slice; that is a
+        # separate boundary that is exercised by ``test_pr5_owns_api_and_frontend_*``
+        # and the build guard. We tolerate the missing manifest until the
+        # scaffold lands.
+        return
+
+    payload = json.loads(package_json.read_text(encoding="utf-8"))
+    for section in ("dependencies", "devDependencies"):
+        for name in payload.get(section, {}).keys():
+            assert not name.startswith("@langchain/"), f"forbidden frontend dep: {name}"
+            assert name not in {"langgraph", "prometheus-client", "grafana-"}, (
+                f"forbidden frontend dep: {name}"
+            )
