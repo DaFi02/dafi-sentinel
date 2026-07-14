@@ -11,3 +11,12 @@ wheels/
 
 # Agent-local generated files
 .atl/
+
+# TypeScript build artifacts (composite project references)
+*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
+frontend/vitest.config.d.ts
+frontend/vitest.config.js
+frontend/src/vite/*.d.ts
+frontend/src/vite/*.js

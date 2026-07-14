@@ -1,30 +1,21 @@
 /// <reference types="vitest" />
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { cspTogglePlugin } from "./src/vite/csp-toggle";
 
-// R2 high#7: DAFI_DEV_NO_CSP_META toggle. The strict
-// ``Content-Security-Policy`` meta tag shipped in ``index.html`` blocks
-// Vite HMR inline scripts in dev mode, so the toggle lets the dev
-// server (and the test build) suppress the meta tag via an env var.
-// Production builds keep the strict CSP unless the operator opts out.
-const cspTogglePlugin: Plugin = {
-  name: "dafi-csp-toggle",
-  transformIndexHtml(html) {
-    if (process.env.DAFI_DEV_NO_CSP_META !== "1") {
-      return html;
-    }
-    return html.replace(
-      /<meta\s+http-equiv="Content-Security-Policy"[^>]*\/?>/i,
-      "<!-- Content-Security-Policy suppressed: DAFI_DEV_NO_CSP_META=1 -->",
-    );
-  },
-};
-
-// Vite + Vitest share configuration: the React plugin powers the dev
-// server, the Vitest block mounts the testing-library helpers and the
-// jsdom environment that the PR5 dashboard tests need.
+// Vite + Vitest share configuration. The ``test`` field is augmented
+// into Vite's ``InlineConfig`` by ``vitest/config`` but the augmentation
+// does not propagate reliably through ``tsconfig.node.json`` (which has
+// ``composite: true`` + ``skipLibCheck: true`` for project references).
+// The runtime config is correct; the cast on ``test`` below silences the
+// false-positive type error.
+//
+// R3 F1: forbid ``.only`` on any test or describe block. Vitest treats
+// an ``.only`` as a hard failure so a forgotten modifier cannot silently
+// shrink the suite. The 10-second ceiling guards the slow ResizeObserver
+// stub tests without making the fast tests wait.
 export default defineConfig({
-  plugins: [react(), cspTogglePlugin],
+  plugins: [react(), cspTogglePlugin()],
   server: {
     port: 5173,
     proxy: {
@@ -43,11 +34,7 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     css: false,
-    // R3 F1: forbid ``.only`` on any test or describe block. Vitest treats
-    // an ``.only`` as a hard failure so a forgotten modifier cannot silently
-    // shrink the suite. The 10-second ceiling guards the slow ResizeObserver
-    // stub tests without making the fast tests wait.
     forbidOnly: true,
     testTimeout: 10_000,
-  },
+  } as never,
 });
