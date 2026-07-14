@@ -78,6 +78,18 @@ actions.
 """
 
 
+# R3 F8: the system approver identity used by the CRIT-6 sweeper is
+# declared before its first reference so the module reads top-down
+# without a forward-declaration dance. The role carries the
+# ``approval:grant`` permission so the authorization check passes
+# when the sweeper resumes a paused graph.
+_SYSTEM_APPROVER = UserRef(
+    id="system",
+    display_name="System",
+    roles=(Role("system", permissions=(Permission(APPROVER_PERMISSION),)),),
+)
+
+
 # --------------------------------------------------------------------------- #
 # Public state + payload contracts
 # --------------------------------------------------------------------------- #
@@ -568,10 +580,16 @@ def _make_finalize_node(
 def _coerce_approval(value: Any) -> ApprovalRequest:
     """Coerce the resume value (which round-trips through pickle) into an :class:`ApprovalRequest`.
 
-    The CRIT-2 fix expects the approver as a :class:`UserRef` (not a
-    bare id). The helper still tolerates the prior ``approver_id`` shape
-    for backward compatibility with older test fixtures, but treats a
-    missing approver as a self/unauthorized denial downstream.
+    The approver MUST be a :class:`UserRef` (or a dict with the same
+    shape). A missing or malformed approver resolves to ``approver=None``;
+    the approval node then records the decision as
+    ``approval-self-or-unauthorized`` and skips the chart render.
+
+    R2 high#10 / R3 F19: the prior ``approver_id`` fallback accepted a
+    bare string id (without roles) as an approver. The fallback was
+    removed: a missing ``approver`` field now means a denial, and a
+    caller wanting to attribute a decision to a specific human must
+    supply a :class:`UserRef` with the ``approval:grant`` permission.
     """
     if isinstance(value, ApprovalRequest):
         return value
@@ -587,13 +605,7 @@ def _coerce_approval(value: Any) -> ApprovalRequest:
                 roles=approver_value.get("roles") or (),
             )
         else:
-            # Fallback for older fixtures: a bare approver_id string.
-            legacy_id = str(value.get("approver_id") or "")
-            approver = (
-                UserRef(id=legacy_id, display_name=legacy_id, roles=())
-                if legacy_id
-                else None
-            )
+            approver = None
         return ApprovalRequest(approved=bool(value.get("approved", False)), approver=approver)
     return ApprovalRequest(approved=False, approver=None)
 
@@ -673,13 +685,6 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # Paused-graph TTL sweeper (CRIT-6)
 # --------------------------------------------------------------------------- #
-
-
-_SYSTEM_APPROVER = UserRef(
-    id="system",
-    display_name="System",
-    roles=(Role("system", permissions=(Permission(APPROVER_PERMISSION),)),),
-)
 
 
 def sweep_stale_pauses(
