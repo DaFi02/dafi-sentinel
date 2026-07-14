@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import secrets
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -55,15 +56,23 @@ class InMemoryEvidenceRepository:
     concrete class and the Protocol that WorkbenchService declared).
     Method names match the Protocol verbatim so an ``isinstance`` check
     (``@runtime_checkable`` on the Protocol) works without monkey-patching.
+
+    PR-C.10 (R1 med#9, R4 high#6): every mutation acquires the
+    ``_lock`` so two threads racing to write the same evidence id do
+    not clobber each other. Reads stay lock-free (Python's GIL keeps
+    the dict operations atomic for the single-step ``get`` / iteration
+    patterns we use).
     """
 
     _records: dict[str, RedactedIncidentRecord] = field(default_factory=dict)
     _owners: dict[str, str] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def save_evidence(self, owner_id: str, record: RedactedIncidentRecord) -> EvidenceRef:
         evidence_id = record.evidence_ref.evidence_id
-        self._records[evidence_id] = record
-        self._owners[evidence_id] = owner_id
+        with self._lock:
+            self._records[evidence_id] = record
+            self._owners[evidence_id] = owner_id
         return record.evidence_ref
 
     def get_evidence(self, evidence_id: str) -> RedactedIncidentRecord | None:
@@ -96,16 +105,24 @@ class InMemoryAuditRepository:
     gate keeps writing to its own :class:`AuditSink` for policy
     decisions while the API writes its own audit records for
     login/logout/Q&A/chart actions.
+
+    PR-C.10 (R1 med#9, R4 high#6): every mutation acquires the
+    ``_lock`` so two threads racing to write audit records do not
+    leave the primary list and the secondary indexes inconsistent.
+    Reads stay lock-free for the same reason as the evidence
+    repository.
     """
 
     _records: list[AuditRecord] = field(default_factory=list)
     _by_actor: dict[str, list[str]] = field(default_factory=dict)
     _by_session: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def write_audit(self, session_id: str, record: AuditRecord) -> None:
-        self._records.append(record)
-        self._by_actor.setdefault(record.actor.id, []).append(record.id)
-        self._by_session.setdefault((record.actor.id, session_id), []).append(record.id)
+        with self._lock:
+            self._records.append(record)
+            self._by_actor.setdefault(record.actor.id, []).append(record.id)
+            self._by_session.setdefault((record.actor.id, session_id), []).append(record.id)
 
     def list_for_actor(self, actor_id: str) -> tuple[AuditRecord, ...]:
         ids = self._by_actor.get(actor_id, [])
