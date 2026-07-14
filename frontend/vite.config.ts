@@ -25,5 +25,11 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     css: false,
+    // R3 F1: forbid ``.only`` on any test or describe block. Vitest treats
+    // an ``.only`` as a hard failure so a forgotten modifier cannot silently
+    // shrink the suite. The 10-second ceiling guards the slow ResizeObserver
+    // stub tests without making the fast tests wait.
+    forbidOnly: true,
+    testTimeout: 10_000,
   },
 });
