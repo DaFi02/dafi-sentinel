@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg import sql
 
 from dafi_sentinel.domain.models import Document, EvidenceRef
 
@@ -79,15 +80,22 @@ class PgVectorRetrievalIndex:
         query_vec = self._embed_text(query)
         vector_literal = self._format_vector(query_vec)
 
+        # PR-C.17 (R2 med): the table name MUST go through
+        # ``psycopg.sql.Identifier`` so a future refactor that
+        # sources the name from config cannot break out of the
+        # identifier and inject SQL. The vector literal and the
+        # limit stay as %s placeholders (driver binds them).
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    SELECT evidence_ids, source_uri, source_row, source_offset
-                    FROM {self._table_name}
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
+                    sql.SQL(
+                        """
+                        SELECT evidence_ids, source_uri, source_row, source_offset
+                        FROM {table}
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """
+                    ).format(table=sql.Identifier(self._table_name)),
                     (vector_literal, limit),
                 )
                 rows = cur.fetchall()
@@ -109,44 +117,53 @@ class PgVectorRetrievalIndex:
 
     def ensure_schema(self) -> None:
         """Create the pgvector extension and the configured table if missing."""
+        # PR-C.17: the table name goes through ``psycopg.sql.Identifier``.
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 cur.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {self._table_name} (
-                        doc_id TEXT PRIMARY KEY,
-                        title TEXT NOT NULL,
-                        body TEXT NOT NULL,
-                        source_uri TEXT NOT NULL,
-                        source_row INTEGER,
-                        source_offset INTEGER,
-                        embedding VECTOR({self._embedding_dim}) NOT NULL,
-                        evidence_ids TEXT[] NOT NULL
+                    sql.SQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS {table} (
+                            doc_id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            body TEXT NOT NULL,
+                            source_uri TEXT NOT NULL,
+                            source_row INTEGER,
+                            source_offset INTEGER,
+                            embedding VECTOR({dim}) NOT NULL,
+                            evidence_ids TEXT[] NOT NULL
+                        )
+                        """
+                    ).format(
+                        table=sql.Identifier(self._table_name),
+                        dim=sql.Literal(self._embedding_dim),
                     )
-                    """
                 )
             conn.commit()
 
     def index_document(self, document: Document) -> None:
         """Embed and upsert a single document into the configured table."""
         embedded = self._embed_document(document)
+        # PR-C.17: the table name goes through ``psycopg.sql.Identifier``.
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
-                    INSERT INTO {self._table_name} (
-                        doc_id, title, body, source_uri, source_row, source_offset, embedding, evidence_ids
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector, %s)
-                    ON CONFLICT (doc_id) DO UPDATE SET
-                        title = EXCLUDED.title,
-                        body = EXCLUDED.body,
-                        source_uri = EXCLUDED.source_uri,
-                        source_row = EXCLUDED.source_row,
-                        source_offset = EXCLUDED.source_offset,
-                        embedding = EXCLUDED.embedding,
-                        evidence_ids = EXCLUDED.evidence_ids
-                    """,
+                    sql.SQL(
+                        """
+                        INSERT INTO {table} (
+                            doc_id, title, body, source_uri, source_row, source_offset, embedding, evidence_ids
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector, %s)
+                        ON CONFLICT (doc_id) DO UPDATE SET
+                            title = EXCLUDED.title,
+                            body = EXCLUDED.body,
+                            source_uri = EXCLUDED.source_uri,
+                            source_row = EXCLUDED.source_row,
+                            source_offset = EXCLUDED.source_row,
+                            embedding = EXCLUDED.embedding,
+                            evidence_ids = EXCLUDED.evidence_ids
+                        """
+                    ).format(table=sql.Identifier(self._table_name)),
                     (
                         embedded.doc_id,
                         embedded.title,
