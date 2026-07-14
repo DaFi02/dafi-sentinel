@@ -81,6 +81,32 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Raised when a chart spec fails server-side validation. The server
+ * returns a structured 422 with ``{"detail": {"field": ..., "reason": ...}}``
+ * so the dashboard can render an inline error.
+ */
+export class ChartValidationError extends Error {
+  readonly field: string;
+  readonly reason: string;
+  constructor(field: string, reason: string) {
+    super(`${field}: ${reason}`);
+    this.field = field;
+    this.reason = reason;
+  }
+}
+
+/**
+ * Raised when the workbench server is unreachable. Distinct from
+ * ``ApiError`` so the dashboard can render a "check your
+ * connection" message instead of a status code.
+ */
+export class NetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
 const BASE_URL = "/";
 
 export class ApiClient {
