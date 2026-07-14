@@ -11,10 +11,11 @@ from __future__ import annotations
 import pytest
 
 from dafi_sentinel.charts import validation
+from dafi_sentinel.charts.validation import ChartValidationError
 from dafi_sentinel.domain.models import ChartSpec
 
 
-def _line_spec(**overrides) -> ChartSpec:
+def _spec(**overrides) -> ChartSpec:
     defaults = {
         "kind": "line",
         "title": "Error rate over time",
@@ -28,81 +29,36 @@ def _line_spec(**overrides) -> ChartSpec:
 
 def test_valid_line_chart_spec_passes_validation():
     """A well-formed line chart must validate without error."""
-    validation.validate_chart_spec(_line_spec())  # should not raise
+    validation.validate_chart_spec(_spec())
 
 
-def test_validation_rejects_empty_title():
-    """An empty title is meaningless to the dashboard reviewer."""
-    spec = _line_spec(title="")
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "title"
-
-
-def test_validation_rejects_whitespace_only_title():
-    """A whitespace-only title is just as invalid as an empty one."""
-    spec = _line_spec(title="   ")
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "title"
-
-
-def test_validation_rejects_missing_evidence_ids():
-    """Every chart must cite at least one evidence ID for audit traceability."""
-    spec = _line_spec(evidence_ids=())
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "evidence_ids"
-
-
-def test_validation_rejects_empty_string_evidence_id():
-    """An evidence ID of "" inside the tuple is not a valid citation."""
-    spec = _line_spec(evidence_ids=("",))
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "evidence_ids"
-
-
-def test_validation_rejects_line_chart_missing_x_axis():
-    """A line chart without an x axis cannot be rendered."""
-    spec = _line_spec(x="")
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "x"
-
-
-def test_validation_rejects_bar_chart_missing_y_axis():
-    """A bar chart without a y axis cannot be rendered."""
-    spec = _line_spec(kind="bar", y="   ")
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "y"
-
-
-def test_validation_rejects_scatter_chart_missing_y_axis():
-    """A scatter chart without a y axis cannot be rendered."""
-    spec = _line_spec(kind="scatter", y="")
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "y"
-
-
-def test_table_chart_with_empty_axes_is_valid():
-    """A table chart intentionally has no x/y axes — it lists the evidence rows."""
-    spec = _line_spec(kind="table", x="", y="", evidence_ids=("ev-1", "ev-2"))
-    validation.validate_chart_spec(spec)  # should not raise
-
-
-def test_table_chart_with_optional_column_hints_is_valid():
-    """A table chart can hint at column names but is not required to."""
-    spec = _line_spec(kind="table", x="column_a", y="column_b", evidence_ids=("ev-1",))
-    validation.validate_chart_spec(spec)  # should not raise
-
-
-def test_chart_validation_error_carries_field_and_reason():
-    """The error must surface field + reason for the dashboard to render a useful message."""
-    spec = _line_spec(evidence_ids=())
-    with pytest.raises(validation.ChartValidationError) as failure:
-        validation.validate_chart_spec(spec)
-    assert failure.value.field == "evidence_ids"
+@pytest.mark.parametrize(
+    "overrides, field",
+    [
+        ({"title": ""}, "title"),
+        ({"title": "   "}, "title"),
+        ({"evidence_ids": ()}, "evidence_ids"),
+        ({"evidence_ids": ("",)}, "evidence_ids"),
+        ({"x": ""}, "x"),
+        ({"kind": "bar", "y": "   "}, "y"),
+        ({"kind": "scatter", "y": ""}, "y"),
+    ],
+)
+def test_validation_rejects_invalid_field(overrides, field):
+    """Each invalid field on a non-table chart must raise with that field name."""
+    with pytest.raises(ChartValidationError) as failure:
+        validation.validate_chart_spec(_spec(**overrides))
+    assert failure.value.field == field
     assert failure.value.reason
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"kind": "table", "x": "", "y": "", "evidence_ids": ("ev-1", "ev-2")},
+        {"kind": "table", "x": "column_a", "y": "column_b", "evidence_ids": ("ev-1",)},
+    ],
+)
+def test_table_chart_with_or_without_axes_is_valid(overrides):
+    """Table charts treat evidence rows as the body; axes are optional hints."""
+    validation.validate_chart_spec(_spec(**overrides))
