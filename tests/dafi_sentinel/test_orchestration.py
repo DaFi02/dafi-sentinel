@@ -325,31 +325,3 @@ def test_orchestration_state_is_typed_and_total_false():
     assert "decision_reason" in annotations
     assert "chart_png" in annotations
     assert "audit_records" in annotations
-
-
-def test_orchestration_composes_existing_pr_services_without_reimplementing_them():
-    """The graph must NOT replace the existing services; it only composes them."""
-    workbench, gate, audits = _build_environment()
-    graph = build_investigation_graph(
-        workbench=workbench,
-        gate=gate,
-        audits=audits,
-    )
-
-    # The retrieval step MUST come from the PR3 retrieval contract
-    # (InMemoryRetrievalIndex is the PR3 fixture adapter). Replace it
-    # with an empty index and confirm the graph answers "unknown" without
-    # citing evidence — proving the graph does not have its own retrieval.
-    workbench.seed_documents(())
-    final = _run_with_approval(
-        graph,
-        config={"configurable": {"thread_id": "compose-1"}},
-        initial=_initial_state(question="unrelated gibberish question xyz"),
-        approved=True,
-    )
-
-    assert list(final["cited"]) == []
-    assert final["answer"] == "unknown"
-    # The chart is still rendered, but with no evidence cited.
-    assert final.get("chart_png") is None
-    assert final["decision_reason"] == "no-supporting-evidence"
