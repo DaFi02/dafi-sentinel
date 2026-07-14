@@ -22,7 +22,7 @@ const DEFAULT_SPEC: ChartSpecPayload = {
 
 export function ChartsPage() {
   const [spec, setSpec] = useState<ChartSpecPayload>(DEFAULT_SPEC);
-  const render = useRenderChart(true);
+  const render = useRenderChart();
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

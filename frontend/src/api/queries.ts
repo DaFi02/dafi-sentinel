@@ -35,26 +35,19 @@ export function useEvidence(evidenceId: string | null, enabled: boolean) {
   });
 }
 
-export function useAskQuestion(enabled: boolean) {
+export function useAskQuestion() {
   return useMutation<QAResponse, Error, { question: string; session_id: string; limit?: number }>({
     mutationFn: async (payload) => apiClient.askQuestion(payload),
-    onSuccess: () => {
-      // Refreshing audits is cheap and keeps the audit page fresh after Q&A.
-      void enabled;
-    },
   });
 }
 
-export function useRenderChart(enabled: boolean) {
+export function useRenderChart() {
   return useMutation<
     ChartResponse,
     Error,
     { spec: ChartSpecPayload; data: Array<[unknown, unknown]> }
   >({
     mutationFn: async (payload) => apiClient.renderChart(payload),
-    onSuccess: () => {
-      void enabled;
-    },
   });
 }
 

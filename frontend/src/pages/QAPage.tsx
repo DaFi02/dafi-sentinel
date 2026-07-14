@@ -6,7 +6,7 @@ import { ApiError } from "../api/client";
 export function QAPage() {
   const [question, setQuestion] = useState("What triggered the incident?");
   const [sessionId, setSessionId] = useState("session-1");
-  const ask = useAskQuestion(true);
+  const ask = useAskQuestion();
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
