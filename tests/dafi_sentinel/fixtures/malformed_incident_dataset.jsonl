@@ -1,0 +1,1 @@
+{"incident_id":"inc-001","source":{"uri":"fixtures/incidents/malformed.jsonl","row":1},"summary":"Missing timestamp must fail before commit.","fields":{"service":"checkout"}}

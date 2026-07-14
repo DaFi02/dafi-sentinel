@@ -1,0 +1,2 @@
+{"incident_id":"inc-001","timestamp":"2026-07-14T10:05:00+00:00","source":{"uri":"fixtures/incidents/checkout.jsonl","row":2},"summary":"Checkout latency increased after deploy api-42 with token sk_live_123456.","fields":{"service":"checkout","severity":"critical","api_key":"sk_live_123456"}}
+{"incident_id":"inc-001","timestamp":"2026-07-14T10:03:00+00:00","source":{"uri":"fixtures/incidents/checkout.jsonl","row":1},"summary":"Payment dependency timeout crossed alert threshold.","fields":{"service":"payments","severity":"warning"}}
