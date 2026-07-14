@@ -100,7 +100,37 @@ def test_pgvector_format_vector_emits_pgvector_literal():
 
 
 def test_pgvector_adapter_surfaces_clear_error_when_unreachable():
-    """A short-timeout connection to an invalid host must raise ``PgVectorConnectionError``."""
+    """A short-timeout connection to an invalid host must raise ``PgVectorConnectionError``.
+
+    PR-C.22 (R3 F15): the test is bounded by a 5s pytest-timeout so
+    a regression in the connect path cannot hang the suite
+    indefinitely. The contract: the error surfaces within 5s; the
+    connection attempt does not block forever.
+    """
+    from dafi_sentinel.retrieval import pgvector
+
+    adapter = pgvector.PgVectorRetrievalIndex(
+        dsn="postgresql://127.0.0.1:1/none",
+        table_name="smoke_documents",
+        connect_timeout=1,
+    )
+
+    with pytest.raises(pgvector.PgVectorConnectionError):
+        adapter._connect()
+
+
+@pytest.mark.timeout(5)
+def test_pgvector_unreachable_bounds_wait_to_five_seconds():
+    """The unreachable test MUST complete within 5 seconds (no infinite wait).
+
+    PR-C.22: pin the bounded-wait contract on the unreachable test
+    so a future regression in the connect path (e.g., dropping the
+    ``connect_timeout`` argument) fails the test with a timeout
+    rather than hanging CI. The test is functionally identical to
+    ``test_pgvector_adapter_surfaces_clear_error_when_unreachable``
+    but is marked with ``pytest.mark.timeout(5)`` so the runner
+    enforces the bound.
+    """
     from dafi_sentinel.retrieval import pgvector
 
     adapter = pgvector.PgVectorRetrievalIndex(
