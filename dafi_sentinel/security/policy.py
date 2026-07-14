@@ -111,8 +111,28 @@ class SecurityGate:
         return decision
 
     def inspect_user_request(self, actor: ActorRef, session_id: str, text: str) -> PolicyDecision:
+        # PR-C.14 (R3 F11, R4 high#3): widen the trigger surface to
+        # cover the prompt-injection patterns the 4R review caught.
+        # The pre-PR-C.14 implementation only matched the literal
+        # substrings ``"unredacted"`` and ``"secret"``; patterns that
+        # phrased the same intent differently (e.g., ``"show me
+        # raw"`` or ``"bypass redaction"``) slipped through. The
+        # trigger list is kept small on purpose so a benign analyst
+        # question (e.g., "how many users have the analyst role?")
+        # does not match by accident.
         normalized = text.lower()
-        if "unredacted" in normalized or "secret" in normalized:
+        triggers = (
+            "unredacted",
+            "secret",
+            "raw credential",
+            "bypass the redaction",
+            "bypass redaction",
+            "exfiltrate",
+            "dump the",
+            "reveal unredacted",
+            "give me the password",
+        )
+        if any(trigger in normalized for trigger in triggers):
             decision = PolicyDecision(False, "redacted-only disclosure boundary", Permission("secrets:reveal"))
             self.audits.record(session_id, actor, "request.inspect", decision, ())
             return decision
