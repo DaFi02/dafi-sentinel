@@ -1,0 +1,3 @@
+{"incident_id":"ml-guard-001","timestamp":"2026-07-14T11:00:00+00:00","source":{"uri":"fixtures/incidents/ml_guard.jsonl","row":1},"summary":"checkout latency payment timeout","fields":{"service":"checkout"}}
+{"incident_id":"ml-guard-001","timestamp":"2026-07-14T11:01:00+00:00","source":{"uri":"fixtures/incidents/ml_guard.jsonl","row":2},"summary":"database connection pool saturation","fields":{"service":"database"}}
+{"incident_id":"ml-guard-001","timestamp":"2026-07-14T11:02:00+00:00","source":{"uri":"fixtures/incidents/ml_guard.jsonl","row":3},"summary":"checkout latency payment timeout","fields":{"service":"checkout"}}

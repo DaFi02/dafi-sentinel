@@ -1,1 +1,1 @@
-"""Security policy services for DAFI Sentinel.""
+"""Security policy services for DAFI Sentinel."""

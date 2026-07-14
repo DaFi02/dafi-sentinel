@@ -1,5 +1,7 @@
 # Proposal: DAFI Sentinel
 
+> **Archive status**: archived on 2026-07-14. HEAD at archive: `e96daa3`. See `archive-report.md` in this folder for the audit trail.
+
 ## Intent
 
 Build a security-first AI incident investigation workbench. V1 turns seeded logs, alerts, deployments, tables, and later runbooks/documents into evidence-backed timelines, hypotheses, answers, and charts.
