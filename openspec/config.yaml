@@ -1,0 +1,77 @@
+schema: spec-driven
+
+project: dafi-sentinel
+initialized_at: 2026-07-14
+artifact_store: both
+
+context: |
+  DAFI Sentinel is a Python 3.13 package managed by uv.
+  PR1 is foundation-only: package skeleton, domain contracts, repository/retrieval ports, and pytest-based contract tests.
+  Later slices may add infrastructure, APIs, UI, ML, and orchestration; PR1 must not introduce those implementations.
+
+strict_tdd: true
+strict_tdd_evidence:
+  - No explicit strict TDD marker was found at the root before initialization.
+  - DAFI Sentinel uses a project-local pytest runner for PR1 foundation work.
+  - First implementation tasks added the runner before production contracts.
+
+testing:
+  detected: 2026-07-14
+  strict_tdd: true
+  primary_commands:
+    - scope: dafi_sentinel
+      command: "uv run pytest"
+      status: detected
+  layers:
+    unit:
+      available: true
+      tools: [pytest]
+    integration:
+      available: true
+      tools: [pytest]
+    e2e:
+      available: partial
+      tools: []
+  coverage:
+    available: true
+    commands: []
+  quality:
+    linter:
+      available: partial
+      commands: []
+    type_checker:
+      available: partial
+      commands: []
+    formatter:
+      available: false
+      commands: []
+
+rules:
+  proposal:
+    - State the business intent, measurable outcome, and rollback plan for risky changes.
+    - Forecast whether the change exceeds the 400 changed-line review budget and plan chained PRs when needed.
+  specs:
+    - Use RFC 2119 keywords for requirements.
+    - Use Given/When/Then scenarios for externally visible behavior.
+    - Keep generated technical artifacts in English unless explicitly requested otherwise.
+  design:
+    - Document architecture decisions with rationale and trade-offs.
+    - Include sequence diagrams for complex flows.
+    - Preserve PR boundaries; infrastructure and runtime implementations belong to later slices.
+  tasks:
+    - Group tasks by phase and keep each task completable in one focused session.
+    - Pair implementation tasks with tests under strict TDD.
+  apply:
+    tdd: true
+    test_command: "uv run pytest"
+    instructions:
+      - Write or update the failing test before production code when a project-local runner exists.
+      - If the runner does not exist yet, the first apply task must create it and prove it runs.
+  verify:
+    test_command: "uv run pytest"
+    build_command: null
+    coverage_threshold: 0
+    instructions:
+      - Report commands run, skipped commands, and reasons.
+  archive:
+    - Merge completed delta specs into openspec/specs/ and keep archived changes immutable.
