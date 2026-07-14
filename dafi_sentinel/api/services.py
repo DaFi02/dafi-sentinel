@@ -103,20 +103,6 @@ class InMemoryAuditRepository:
         return tuple(self._records)
 
 
-class EvidenceRepositoryAdapter:
-    """Adapt :class:`InMemoryEvidenceRepository` to the ``EvidenceRepository`` protocol."""
-
-    def __init__(self, store: InMemoryEvidenceRepository, owner_id: str) -> None:
-        self._store = store
-        self._owner_id = owner_id
-
-    def save_evidence(self, record: RedactedIncidentRecord) -> EvidenceRef:
-        return self._store.save(self._owner_id, record)
-
-    def get_evidence(self, evidence_id: str) -> RedactedIncidentRecord | None:
-        return self._store.get(evidence_id)
-
-
 @dataclass(frozen=True)
 class CitedEvidenceWithScore:
     """Cited evidence paired with the ML ranker score that selected it.
