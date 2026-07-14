@@ -19,9 +19,11 @@ All endpoints enforce session ownership through the
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
@@ -91,6 +93,8 @@ def create_workbench_app(
     security_allowed_hosts: tuple[str, ...] = DEFAULT_SECURITY_ALLOWED_HOSTS,
     security_cors_origins: tuple[str, ...] = DEFAULT_SECURITY_CORS_ORIGINS,
     hsts_max_age_seconds: int = DEFAULT_HSTS_MAX_AGE_SECONDS,
+    rate_limit_per_minute: int | None = None,
+    max_payload_bytes: int | None = None,
 ) -> FastAPI:
     """Build the FastAPI app with the supplied services.
 
@@ -213,6 +217,58 @@ def create_workbench_app(
                 f"max-age={hsts_max_age_seconds}; includeSubDomains",
             )
             return response
+
+    # PR-C.4 (R1 high#3): rate limits and payload-size caps on the
+    # public mutation endpoints (``/sessions``, ``/qa``, ``/charts``).
+    # Both layers are off by default so the dev factory and the
+    # pre-PR-C.4 test suite keep working without changes. The limits
+    # are in-process and per-key: a multi-worker deploy shares the
+    # limits across workers only when the operator fronts the app
+    # with a sticky-session proxy.
+    if rate_limit_per_minute is not None or max_payload_bytes is not None:
+        # Sliding window of request timestamps per key. The deque is
+        # bounded by the rate limit so memory stays small. The
+        # defaultdict is intentionally module-level (not on app.state)
+        # so the rate limit survives a single process lifetime and
+        # the lock contention stays inside one worker.
+        _rate_log: dict[str, deque[float]] = defaultdict(deque)
+        _rate_lock = asyncio.Lock()
+
+        @app.middleware("http")
+        async def _rate_limit_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
+            path = request.url.path
+            if rate_limit_per_minute is not None and path in {"/sessions", "/qa", "/charts"} and request.method in {"POST"}:
+                # /sessions is unauthenticated; rate-limit by client IP.
+                # /qa and /charts are authenticated; we still rate-limit
+                # by IP because the auth check happens downstream and
+                # we want to shed load before doing the lookup.
+                client_host = request.client.host if request.client else "unknown"
+                key = f"{path}:{client_host}"
+                now = monotonic()
+                async with _rate_lock:
+                    window = _rate_log[key]
+                    cutoff = now - 60.0
+                    while window and window[0] < cutoff:
+                        window.popleft()
+                    if len(window) >= rate_limit_per_minute:
+                        return JSONResponse(
+                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            content={"detail": "rate limit exceeded"},
+                            headers={"Retry-After": "60"},
+                        )
+                    window.append(now)
+            if max_payload_bytes is not None and request.method in {"POST", "PUT", "PATCH"}:
+                content_length = request.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > max_payload_bytes:
+                            return JSONResponse(
+                                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                content={"detail": f"payload exceeds {max_payload_bytes} bytes"},
+                            )
+                    except ValueError:
+                        pass
+            return await call_next(request)
 
     app.state.auth = auth
     app.state.workbench = workbench
