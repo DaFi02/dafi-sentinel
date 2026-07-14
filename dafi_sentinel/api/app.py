@@ -382,6 +382,36 @@ def _payload_to_spec(payload: ChartSpecPayload) -> ChartSpec:
     )
 
 
+def _dev_password(env_var: str = "DAFI_DEV_PASSWORD", *, length: int = 16) -> str:
+    """Return a dev-only password for the seeded users.
+
+    R1 high#1: the previous factory hardcoded ``"hunter2!"`` and a
+    matching ``"correct horse"`` so anyone reading the repo could
+    log in. The dev-only posture replaces both with a fresh token
+    generated on every boot; the ``DAFI_DEV_PASSWORD`` env var
+    overrides the random generation with a stable value so scripts
+    and CI can pin a credential without checking the plaintext into
+    source control. The function is local to the dev factory — it is
+    never imported by production code.
+    """
+    import logging
+    import os
+    import secrets
+
+    logger = logging.getLogger(__name__)
+    override = os.environ.get(env_var)
+    if override:
+        return override
+    generated = secrets.token_urlsafe(length)
+    logger.warning(
+        "DAFI_DEV_PASSWORD is not set; generated a random dev-only "
+        "password for the seeded users: %s. Set DAFI_DEV_PASSWORD to "
+        "pin a stable credential in local development.",
+        generated,
+    )
+    return generated
+
+
 def default_workbench_app() -> FastAPI:
     """Convenience factory wired with fresh in-memory services.
 
@@ -389,22 +419,48 @@ def default_workbench_app() -> FastAPI:
     local development. Tests build their own app via
     :func:`create_workbench_app`.
 
-    The factory disables ``cookie_secure`` (browsers reject Secure cookies
+    R4 crit#1: this factory is **dev-only**. The seeded users carry a
+    random on-boot password (or a ``DAFI_DEV_PASSWORD`` override); the
+    factory disables ``cookie_secure`` (browsers reject Secure cookies
     over the HTTP dev server) and gates the dashboard dev server CSP via
-    the ``DAFI_DEV_NO_CSP_META=1`` env var so Vite HMR inline scripts are
-    not blocked. Production deployments must use HTTPS and keep the strict
-    meta-CSP — see :func:`create_workbench_app` for the production defaults.
+    the ``DAFI_DEV_NO_CSP_META=1`` env var so Vite HMR inline scripts
+    are not blocked. Production deployments must:
+
+    * Build the app via :func:`create_workbench_app` with
+      ``cookie_secure=True`` and a real ``AuthService`` backed by a
+      durable user store.
+    * Set the ``DAFI_PRODUCTION_POSTURE`` env var so the application
+      fails fast if the dev factory is reached in production.
+    * Keep the strict meta-CSP — see :func:`create_workbench_app` for
+      the production defaults.
     """
+    import os
+
     from dafi_sentinel.api.auth import AuthService, InMemorySessionStore, InMemoryUserStore
     from dafi_sentinel.domain.models import Permission, Role
 
+    if os.environ.get("DAFI_PRODUCTION_POSTURE") == "1":
+        raise RuntimeError(
+            "default_workbench_app is dev-only; production must call "
+            "create_workbench_app with a real user store and "
+            "cookie_secure=True."
+        )
+
+    dev_password = _dev_password()
     users = InMemoryUserStore()
     users.add(
         "user-1",
         "Analyst",
         "ada",
-        "hunter2!",
+        dev_password,
         roles=(Role("analyst", permissions=(Permission("chart:request"),)),),
+    )
+    users.add(
+        "user-2",
+        "Maintainer",
+        "mike",
+        dev_password,
+        roles=(Role("maintainer", permissions=(Permission("tool:python"),)),),
     )
 
     workbench = WorkbenchService(

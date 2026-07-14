@@ -109,8 +109,17 @@ Every stateful action writes an ``AuditRecord`` through the
 
 | user id | display name | username | password | roles |
 |---|---|---|---|---|
-| `user-1` | Analyst    | `ada`  | `hunter2!`     | analyst (tool:search, chart:request) |
-| `user-2` | Maintainer | `mike` | `correct horse`| maintainer (tool:python) |
+| `user-1` | Analyst    | `ada`  | *(random on boot — see below)*     | analyst (tool:search, chart:request) |
+| `user-2` | Maintainer | `mike` | *(random on boot — see below)* | maintainer (tool:python) |
+
+> R1 high#1: the dev server no longer ships with a plaintext seeded
+> password. On boot, ``default_workbench_app`` generates a fresh
+> password for each seeded user and prints it to the server log. The
+> ``DAFI_DEV_PASSWORD`` environment variable overrides the random
+> generation with a stable dev-only credential so scripts and CI can
+> pin the password without checking it into source control. The
+> dev-only posture is documented in
+> ``dafi_sentinel.api.app.default_workbench_app``.
 
 ### Run the dashboard
 
