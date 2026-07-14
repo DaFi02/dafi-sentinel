@@ -46,7 +46,7 @@ from dafi_sentinel.api.audit_enums import AuditAction, AuditReason
 from dafi_sentinel.api.services import WorkbenchService, new_audit_id
 from dafi_sentinel.domain.models import ActorRef, AuditRecord, Permission, PolicyDecision, Role, UserRef
 from dafi_sentinel.security.policy import SecurityGate
-from dafi_sentinel.storage.contracts import AuditRepository
+from dafi_sentinel.storage.contracts import ActorStore, AuditRepository
 
 
 # --------------------------------------------------------------------------- #
@@ -161,6 +161,7 @@ def build_investigation_graph(
     workbench: WorkbenchService,
     gate: SecurityGate,
     audits: AuditRepository,
+    actor_store: ActorStore | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     paused_graph_ttl_seconds: int = 3600,
     clock: Callable[[], datetime] | None = None,
@@ -203,7 +204,7 @@ def build_investigation_graph(
     builder.add_node("inspect", _make_inspect_node(gate, audits, effective_clock))
     builder.add_node("retrieve", _make_retrieve_node(workbench, audits, effective_clock))
     builder.add_node("compose_answer", _make_compose_node())
-    builder.add_node("request_approval", _make_approval_node(audits, effective_clock))
+    builder.add_node("request_approval", _make_approval_node(audits, effective_clock, actor_store))
     builder.add_node("render_chart", _make_render_node(workbench, audits, effective_clock))
     builder.add_node("finalize", _make_finalize_node(audits, effective_clock))
 
@@ -331,6 +332,7 @@ def _make_compose_node() -> Callable[[InvestigationState], dict[str, Any]]:
 def _make_approval_node(
     audits: AuditRepository,
     clock: Callable[[], datetime],
+    actor_store: ActorStore | None = None,
 ) -> Callable[[InvestigationState], dict[str, Any]]:
     def request_approval(state: InvestigationState) -> dict[str, Any]:
         requestor_id = state.get("actor_id") or ""
@@ -353,6 +355,7 @@ def _make_approval_node(
             requestor_id=requestor_id,
             approver=approval.approver,
             approved=approval.approved,
+            actor_store=actor_store,
         )
         state_update = _record_approval_decision(
             audits=audits,
@@ -372,6 +375,7 @@ def _check_authorization(
     requestor_id: str,
     approver: UserRef | None,
     approved: bool,
+    actor_store: ActorStore | None = None,
 ) -> tuple[ActorRef, PolicyDecision]:
     """Resolve the approver authorization decision for the approval node.
 
@@ -387,6 +391,13 @@ def _check_authorization(
     3. Approver lacks the ``approval:grant`` permission → unauthorized denial.
     4. Sweeper-resumed system approver → timeout denial.
     5. Otherwise → either approval or refusal, attributed to the approver.
+
+    PR-C.6 (R1 high#2): when ``actor_store`` is supplied, the
+    ``approver`` is replaced by the store-returned ``UserRef`` so a
+    caller cannot forge a permission set. When the store is not
+    supplied (legacy / pre-PR-C.6 call sites), the caller-supplied
+    ``UserRef`` is honored and a ``logger.warning`` makes the gap
+    visible at runtime.
     """
     # 1. Missing approver (legacy / malformed resume payload).
     if approver is None:
@@ -395,11 +406,32 @@ def _check_authorization(
             PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED),
         )
 
+    # PR-C.6: replace the caller-supplied approver with the
+    # server-side lookup result. When the store is not supplied the
+    # legacy behavior holds; the warning makes the gap visible so an
+    # operator can wire the store before deploying.
+    canonical_approver = approver
+    if actor_store is not None:
+        resolved = actor_store.get_user(approver.id)
+        if resolved is None:
+            return (
+                ActorRef(id=approver.id, kind="user"),
+                PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED),
+            )
+        canonical_approver = resolved
+    else:
+        logger.warning(
+            "build_investigation_graph was called without an actor_store; "
+            "_check_authorization will trust the caller-supplied UserRef. "
+            "PR-C.6: pass an ActorStore to close the R1 high#2 privilege "
+            "escalation gap."
+        )
+
     # 2 + 3. Separation of duties and permission check.
-    authz = _evaluate_approver(requestor_id=requestor_id, approver=approver)
+    authz = _evaluate_approver(requestor_id=requestor_id, approver=canonical_approver)
     if not authz.allowed:
         return (
-            ActorRef(id=approver.id, kind="user"),
+            ActorRef(id=canonical_approver.id, kind="user"),
             authz,
         )
 
@@ -407,19 +439,19 @@ def _check_authorization(
     # ``approval:grant`` permission via its implicit role, so the authz
     # check above passes. Detect the system path and surface the
     # timeout reason so the audit trail captures the abandonment.
-    if approver.id == _SYSTEM_APPROVER.id:
+    if canonical_approver.id == _SYSTEM_APPROVER.id:
         return (
-            ActorRef(id=approver.id, kind="user"),
+            ActorRef(id=canonical_approver.id, kind="user"),
             PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_TIMEOUT),
         )
 
     # 5. Normal human approver: respect the approver's verdict.
     return (
-        ActorRef(id=approver.id, kind="user"),
+        ActorRef(id=canonical_approver.id, kind="user"),
         PolicyDecision(
             allowed=approved,
             reason=(
-                f"approved-by-{approver.id}" if approved
+                f"approved-by-{canonical_approver.id}" if approved
                 else AuditReason.APPROVAL_DENIED
             ),
         ),
