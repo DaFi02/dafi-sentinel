@@ -18,6 +18,9 @@ All endpoints enforce session ownership through the
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,6 +57,13 @@ from dafi_sentinel.api.services import (
     png_to_base64,
 )
 from dafi_sentinel.domain.models import ActorRef, ChartSpec, UserRef
+from dafi_sentinel.security.policy import SecurityGate
+
+
+# Default sweeper interval (seconds) for the FastAPI lifespan task.
+# PR-C.2 ships the lifespan; operators that want a different cadence
+# can pass ``sweeper_interval_seconds`` to ``create_workbench_app``.
+DEFAULT_SWEEPER_INTERVAL_SECONDS = 60
 
 
 def create_workbench_app(
@@ -62,6 +72,9 @@ def create_workbench_app(
     workbench: WorkbenchService,
     cookie_secure: bool = True,
     cookie_name: str = "dafi_sentinel_session",
+    gate: SecurityGate | None = None,
+    sweep_graph: Callable[[], Any] | None = None,
+    sweeper_interval_seconds: float = DEFAULT_SWEEPER_INTERVAL_SECONDS,
 ) -> FastAPI:
     """Build the FastAPI app with the supplied services.
 
@@ -73,7 +86,64 @@ def create_workbench_app(
     cookie name and the ``Secure`` flag are configurable so tests can
     exercise the contract under HTTP (the test client bypasses the
     ``Secure`` check anyway, but the flag still affects the header).
+
+    PR-C.2 (R4 crit#3): when ``sweep_graph`` is supplied, the factory
+    mounts a FastAPI ``lifespan`` that runs the call on a fixed
+    interval (default 60s) and cancels the background task on
+    shutdown. The default ``default_workbench_app`` factory does NOT
+    pass ``sweep_graph`` because the dev server has no compiled graph
+    to sweep; production deployments wire the real
+    :func:`dafi_sentinel.orchestration.production_graph.production_graph`
+    factory and pass the bound method here.
     """
+
+    @asynccontextmanager
+    async def _lifespan(_: FastAPI):
+        """Start the paused-graph sweeper on startup; cancel it on shutdown.
+
+        The lifespan is a no-op when ``sweep_graph`` is not supplied
+        (e.g., the dev factory or any test that does not exercise the
+        background sweeper). When it IS supplied, the lifespan creates
+        a long-running task that calls the callable at
+        ``sweeper_interval_seconds`` intervals; the task is cancelled
+        on shutdown so a graceful uvicorn reload does not leak threads.
+        """
+        if sweep_graph is None:
+            yield
+            return
+
+        import logging
+        logger = logging.getLogger(__name__)
+
+        stop = asyncio.Event()
+        task: asyncio.Task[None] | None = None
+
+        async def _run_sweeper() -> None:
+            try:
+                while not stop.is_set():
+                    try:
+                        sweep_graph()
+                    except Exception:  # noqa: BLE001 — keep the task alive
+                        logger.exception("paused-graph sweeper raised; continuing")
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=sweeper_interval_seconds)
+                    except asyncio.TimeoutError:
+                        continue
+            except asyncio.CancelledError:
+                # Explicit cancel from shutdown: surface for clean teardown.
+                raise
+
+        task = asyncio.create_task(_run_sweeper(), name="dafi-sweeper")
+        try:
+            yield
+        finally:
+            stop.set()
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
     app = FastAPI(
         title="DAFI Sentinel Workbench API",
@@ -83,11 +153,14 @@ def create_workbench_app(
             "evidence/QA/chart/role/audit endpoints. LangGraph and any "
             "third-party orchestration ship in PR6."
         ),
+        lifespan=_lifespan,
     )
     app.state.auth = auth
     app.state.workbench = workbench
+    app.state.gate = gate
     app.state.cookie_name = cookie_name
     app.state.cookie_secure = cookie_secure
+    app.state.sweep_graph = sweep_graph
 
     def _resolve_token(request: Request) -> str:
         """Resolve a session token from the cookie first, then the bearer header.
@@ -200,6 +273,14 @@ def create_workbench_app(
         ``Authorization: Bearer <token>`` header. The bearer and the
         path token MUST agree to prevent a user from revoking another
         user's session.
+
+        R4 high#7: this path is deprecated and will be removed in a
+        future release. The dashboard has migrated to
+        ``DELETE /sessions/me`` (cookie transport); non-browser
+        clients should switch to ``POST /sessions`` for re-auth or
+        ``DELETE /sessions/me`` with a bearer-only flow. The
+        ``Deprecation`` and ``Sunset`` response headers are set so
+        clients can detect the scheduled removal.
         """
         resolved = auth.resolve_session(token)
         if resolved is None:
@@ -340,7 +421,11 @@ def create_workbench_app(
 
     @app.exception_handler(HTTPException)
     def _http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None),
+        )
 
     @app.exception_handler(ChartValidationError)
     def _chart_validation_handler(_: Request, exc: ChartValidationError) -> JSONResponse:
@@ -353,9 +438,9 @@ def create_workbench_app(
         field constraints) before the request reaches the handler, but
         the domain validator is the source of truth for
         ``evidence_ids`` and the ``x`` / ``y`` axis fields. Mapping the
-        exception to a 422 with ``{"detail": {"field": ..., "reason":
-        ...}}`` lets the dashboard render a useful inline error instead
-        of an opaque failure.
+        exception to a 422 with ``{"detail": {"field": ..., "reason": ...}}``
+        lets the dashboard render a useful inline error instead of an
+        opaque failure.
         """
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
