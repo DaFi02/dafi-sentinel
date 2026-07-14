@@ -44,24 +44,28 @@ def new_audit_id() -> str:
 
 @dataclass
 class InMemoryEvidenceRepository:
-    """Flattened evidence store keyed by evidence id.
+    """In-memory implementation of the ``EvidenceRepository`` hexagonal port.
 
     The ingestion service writes :class:`RedactedIncidentRecord` rows into
-    a per-session list. The API needs a flat ``evidence_id -> record``
-    view to support the ``GET /evidence/{evidence_id}`` endpoint. We
-    keep the flat index in sync with the per-session list.
+    a per-owner index; the API exposes the same view to the
+    ``GET /evidence/{evidence_id}`` endpoint. The class is a structural
+    implementation of :class:`dafi_sentinel.storage.contracts.EvidenceRepository`
+    (the 4R review, R2 crit#5, caught the prior asymmetry between this
+    concrete class and the Protocol that WorkbenchService declared).
+    Method names match the Protocol verbatim so an ``isinstance`` check
+    (``@runtime_checkable`` on the Protocol) works without monkey-patching.
     """
 
     _records: dict[str, RedactedIncidentRecord] = field(default_factory=dict)
     _owners: dict[str, str] = field(default_factory=dict)
 
-    def save(self, owner_id: str, record: RedactedIncidentRecord) -> EvidenceRef:
+    def save_evidence(self, owner_id: str, record: RedactedIncidentRecord) -> EvidenceRef:
         evidence_id = record.evidence_ref.evidence_id
         self._records[evidence_id] = record
         self._owners[evidence_id] = owner_id
         return record.evidence_ref
 
-    def get(self, evidence_id: str) -> RedactedIncidentRecord | None:
+    def get_evidence(self, evidence_id: str) -> RedactedIncidentRecord | None:
         return self._records.get(evidence_id)
 
     def owner_of(self, evidence_id: str) -> str | None:
@@ -133,7 +137,17 @@ class WorkbenchService:
     pre-fix behavior so existing callers do not need to change.
     """
 
-    evidence: InMemoryEvidenceRepository
+    evidence: EvidenceRepository
+    """Evidence port widened to the ``EvidenceRepository`` Protocol (R2 crit#5).
+
+    The concrete :class:`InMemoryEvidenceRepository` implementation is the
+    only one shipped today, but a future Postgres-backed adapter can be
+    swapped in without changing this service. The ``@runtime_checkable``
+    decorator on the Protocol (see :mod:`dafi_sentinel.storage.contracts`)
+    turns the type annotation into a runtime ``isinstance`` check at
+    construction time so a misconfigured adapter fails fast.
+    """
+
     audits: AuditRepository
     documents: tuple[Document, ...] = ()
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
@@ -152,7 +166,7 @@ class WorkbenchService:
         return self.evidence.list_for_owner(owner_id)
 
     def get_evidence(self, owner_id: str, evidence_id: str) -> RedactedIncidentRecord:
-        record = self.evidence.get(evidence_id)
+        record = self.evidence.get_evidence(evidence_id)
         if record is None:
             raise LookupError(f"evidence not found: {evidence_id}")
         owner = self.evidence.owner_of(evidence_id)
@@ -194,7 +208,7 @@ class WorkbenchService:
                 CitedEvidenceWithScore(
                     ref=EvidenceRef(
                         evidence_id=match.evidence_id,
-                        source=self.evidence.get(match.evidence_id).source,  # type: ignore[union-attr]
+                        source=self.evidence.get_evidence(match.evidence_id).source,  # type: ignore[union-attr]
                     ),
                     score=match.score,
                 )
@@ -215,7 +229,7 @@ class WorkbenchService:
     def _records_for(self, evidence_refs: Sequence[EvidenceRef]) -> tuple[RedactedIncidentRecord, ...]:
         records: list[RedactedIncidentRecord] = []
         for ref in evidence_refs:
-            record = self.evidence.get(ref.evidence_id)
+            record = self.evidence.get_evidence(ref.evidence_id)
             if record is not None:
                 records.append(record)
         return tuple(records)

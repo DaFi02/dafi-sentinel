@@ -98,7 +98,7 @@ def _environment_with_clock(
         redacted_summary="Payment timeout crossed alert threshold",
         fields={"severity": "critical"},
     )
-    workbench.evidence.save("user-1", record)
+    workbench.evidence.save_evidence("user-1", record)
 
     gate = SecurityGate(
         redactor=RedactionService(),

@@ -61,7 +61,7 @@ def _seeded_app(*, owner_id: str = "user-1", with_docs: bool = True) -> tuple[Te
         redacted_summary="Payment timeout crossed alert threshold",
         fields={"severity": "critical"},
     )
-    evidence.save(owner_id, record)
+    evidence.save_evidence(owner_id, record)
     record2 = RedactedIncidentRecord(
         evidence_ref=EvidenceRef(
             evidence_id="ev-incident-002",
@@ -72,7 +72,7 @@ def _seeded_app(*, owner_id: str = "user-1", with_docs: bool = True) -> tuple[Te
         redacted_summary="Database connection pool exhausted",
         fields={"severity": "high"},
     )
-    evidence.save(owner_id, record2)
+    evidence.save_evidence(owner_id, record2)
 
     if with_docs:
         workbench.seed_documents(
@@ -247,7 +247,7 @@ def test_get_evidence_returns_403_when_record_belongs_to_another_user():
     client, _, _, evidence = _seeded_app()
     ada_token = _login(client)
     # Save a record owned by user-2, but log in as ada and try to read it.
-    evidence.save(
+    evidence.save_evidence(
         "user-2",
         RedactedIncidentRecord(
             evidence_ref=EvidenceRef(
