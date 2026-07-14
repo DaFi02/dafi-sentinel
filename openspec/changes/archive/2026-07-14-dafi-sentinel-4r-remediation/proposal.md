@@ -1,5 +1,9 @@
 # Proposal: DAFI Sentinel 4R Remediation
 
+> **Archive status**: `archived` on 2026-07-14 at HEAD `28a4f7d1370d5581400fb28539555c489d05ed14`.
+> Moved from `openspec/changes/dafi-sentinel-4r-remediation/` to `openspec/changes/archive/2026-07-14-dafi-sentinel-4r-remediation/`.
+> No spec delta — the 5 canonical specs in `openspec/specs/` are unchanged. See `archive-report.md` for the Final Gate report.
+
 > **Change name**: `dafi-sentinel-4r-remediation`
 > **Trigger**: Post-archive 4R review of merged `dafi-sentinel` (PR #1, commit `459e586`).
 > **Reviewers**: R1 Risk, R2 Readability, R3 Reliability, R4 Resilience. 11 CRITICAL, 27 HIGH, 71 MEDIUM, 73 LOW/INFO findings. Full reports in Engram observations `#603`, `#604`, `#601`, `#602`. The archived `verify-report.md` already documents 11 SUGGESTIONs and 5 WARNINGs — this change addresses them.
