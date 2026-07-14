@@ -1,12 +1,30 @@
 /// <reference types="vitest" />
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+
+// R2 high#7: DAFI_DEV_NO_CSP_META toggle. The strict
+// ``Content-Security-Policy`` meta tag shipped in ``index.html`` blocks
+// Vite HMR inline scripts in dev mode, so the toggle lets the dev
+// server (and the test build) suppress the meta tag via an env var.
+// Production builds keep the strict CSP unless the operator opts out.
+const cspTogglePlugin: Plugin = {
+  name: "dafi-csp-toggle",
+  transformIndexHtml(html) {
+    if (process.env.DAFI_DEV_NO_CSP_META !== "1") {
+      return html;
+    }
+    return html.replace(
+      /<meta\s+http-equiv="Content-Security-Policy"[^>]*\/?>/i,
+      "<!-- Content-Security-Policy suppressed: DAFI_DEV_NO_CSP_META=1 -->",
+    );
+  },
+};
 
 // Vite + Vitest share configuration: the React plugin powers the dev
 // server, the Vitest block mounts the testing-library helpers and the
 // jsdom environment that the PR5 dashboard tests need.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), cspTogglePlugin],
   server: {
     port: 5173,
     proxy: {
