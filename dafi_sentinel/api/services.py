@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from dafi_sentinel.api.audit_enums import AuditAction, AuditReason
 from dafi_sentinel.charts.renderer import render_chart
 from dafi_sentinel.charts.validation import validate_chart_spec
 from dafi_sentinel.domain.models import (
@@ -272,9 +273,9 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id=session_id,
-            action="qa.answer",
+            action=AuditAction.QA_ANSWER,
             allowed=bool(cited),
-            reason=("evidence cited" if cited else "no supporting evidence"),
+            reason=(AuditReason.EVIDENCE_CITED if cited else AuditReason.NO_SUPPORTING_EVIDENCE),
             role_context=(owner_id,),
         )
         return answer, cited
@@ -314,7 +315,7 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id="chart",
-            action="chart.render",
+            action=AuditAction.CHART_RENDER,
             allowed=True,
             reason=f"chart {spec.kind} rendered with {len(spec.evidence_ids)} evidence ids",
             role_context=(owner_id,),
@@ -333,9 +334,9 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id=session_id,
-            action="session.login",
+            action=AuditAction.SESSION_LOGIN,
             allowed=True,
-            reason="login succeeded",
+            reason=AuditReason.LOGIN_SUCCEEDED,
             role_context=(),
         )
 
@@ -343,9 +344,9 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id=session_id,
-            action="session.logout",
+            action=AuditAction.SESSION_LOGOUT,
             allowed=True,
-            reason="logout succeeded",
+            reason=AuditReason.LOGOUT_SUCCEEDED,
             role_context=(),
         )
 

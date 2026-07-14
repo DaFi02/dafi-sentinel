@@ -42,6 +42,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from dafi_sentinel.api.audit_enums import AuditAction, AuditReason
 from dafi_sentinel.api.services import WorkbenchService, new_audit_id
 from dafi_sentinel.domain.models import ActorRef, AuditRecord, Permission, PolicyDecision, Role, UserRef
 from dafi_sentinel.security.policy import SecurityGate
@@ -254,7 +255,7 @@ def _make_inspect_node(
 
         record = _build_audit_record(
             actor=actor,
-            action="orchestration.inspect",
+            action=AuditAction.ORCHESTRATION_INSPECT,
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
@@ -284,11 +285,11 @@ def _make_retrieve_node(
         actor = _actor(state)
         decision = PolicyDecision(
             allowed=bool(cited),
-            reason=("evidence cited" if cited else "no supporting evidence"),
+            reason=(AuditReason.EVIDENCE_CITED if cited else AuditReason.NO_SUPPORTING_EVIDENCE),
         )
         record = _build_audit_record(
             actor=actor,
-            action="orchestration.retrieve",
+            action=AuditAction.ORCHESTRATION_RETRIEVE,
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
@@ -336,10 +337,10 @@ def _make_approval_node(
         # permission on the approver. Without an approver, the resume
         # is also treated as a denial.
         if approval.approver is None:
-            decision = PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
+            decision = PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED)
             record = _build_audit_record(
                 actor=ActorRef(id=requestor_id, kind="user"),
-                action="orchestration.approval",
+                action=AuditAction.ORCHESTRATION_APPROVAL,
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
@@ -364,7 +365,7 @@ def _make_approval_node(
             # can see who attempted the unauthorized grant.
             record = _build_audit_record(
                 actor=approver_actor,
-                action="orchestration.approval",
+                action=AuditAction.ORCHESTRATION_APPROVAL,
                 decision=authz,
                 session_id=state["session_id"],
                 role_context=approver_role_context,
@@ -386,10 +387,10 @@ def _make_approval_node(
         # the abandonment.
         is_timeout = approval.approver.id == _SYSTEM_APPROVER.id
         decision_reason = (
-            "approval-timeout" if is_timeout
+            AuditReason.APPROVAL_TIMEOUT if is_timeout
             else (
                 f"approved-by-{approval.approver.id}" if approval.approved
-                else "approval-denied"
+                else AuditReason.APPROVAL_DENIED
             )
         )
         decision = PolicyDecision(
@@ -398,7 +399,7 @@ def _make_approval_node(
         )
         record = _build_audit_record(
             actor=approver_actor,
-            action="orchestration.approval",
+            action=AuditAction.ORCHESTRATION_APPROVAL,
             decision=decision,
             session_id=state["session_id"],
             role_context=approver_role_context,
@@ -447,7 +448,7 @@ def _make_render_node(
             )
             record = _build_audit_record(
                 actor=actor,
-                action="orchestration.render_chart",
+                action=AuditAction.ORCHESTRATION_RENDER_CHART,
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
@@ -467,7 +468,7 @@ def _make_render_node(
             )
             record = _build_audit_record(
                 actor=actor,
-                action="orchestration.render_chart",
+                action=AuditAction.ORCHESTRATION_RENDER_CHART,
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
@@ -492,23 +493,23 @@ def _make_finalize_node(
         existing_reason = state.get("decision_reason")
         approved = bool(state.get("approval_granted"))
 
-        if existing_reason in {"approval-denied", "no-supporting-evidence"} or str(existing_reason or "").startswith("chart-render-failed"):
-            decision_reason = existing_reason or "approval-denied"
+        if existing_reason in {AuditReason.APPROVAL_DENIED, AuditReason.NO_SUPPORTING_EVIDENCE_DASH} or str(existing_reason or "").startswith("chart-render-failed"):
+            decision_reason = existing_reason or AuditReason.APPROVAL_DENIED
             decision = PolicyDecision(allowed=False, reason=decision_reason)
         elif not state.get("cited"):
-            decision_reason = "no-supporting-evidence"
+            decision_reason = AuditReason.NO_SUPPORTING_EVIDENCE_DASH
             decision = PolicyDecision(allowed=False, reason=decision_reason)
         elif approved:
             approver = state.get("approval_approver") or "unknown"
             decision_reason = f"approved-by-{approver}"
             decision = PolicyDecision(allowed=True, reason=decision_reason)
         else:
-            decision_reason = existing_reason or "approval-denied"
+            decision_reason = existing_reason or AuditReason.APPROVAL_DENIED
             decision = PolicyDecision(allowed=False, reason=decision_reason)
 
         record = _build_audit_record(
             actor=actor,
-            action="orchestration.finalize",
+            action=AuditAction.ORCHESTRATION_FINALIZE,
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
@@ -573,10 +574,10 @@ def _evaluate_approver(*, requestor_id: str, approver: UserRef) -> PolicyDecisio
     case fired).
     """
     if approver.id == requestor_id:
-        return PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
+        return PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED)
     if not any(role.allows(APPROVER_PERMISSION) for role in approver.roles):
-        return PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
-    return PolicyDecision(allowed=True, reason="approval-authorized")
+        return PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED)
+    return PolicyDecision(allowed=True, reason=AuditReason.APPROVAL_AUTHORIZED)
 
 
 def _build_audit_record(
