@@ -1,0 +1,37 @@
+version: "3.8"
+
+# Podman Compose stack for the DAFI Sentinel PR3 retrieval smoke.
+#
+# Bring up with:
+#   podman compose -f infra/podman/compose.yaml up -d
+# Run the smoke:
+#   DAFI_PGVECTOR_SMOKE=1 \
+#   DAFI_PGVECTOR_DSN=postgresql://sentinel:sentinel@127.0.0.1:55432/sentinel \
+#   uv run pytest tests/dafi_sentinel/test_pgvector_adapter.py -v
+# Tear down:
+#   podman compose -f infra/podman/compose.yaml down -v
+#
+# This stack intentionally exposes PostgreSQL on 127.0.0.1:55432 (not 5432)
+# so it cannot collide with a system Postgres instance, and the volume is
+# named for easy teardown.
+services:
+  postgres:
+    image: docker.io/pgvector/pgvector:pg16
+    container_name: dafi-sentinel-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      POSTGRES_DB: sentinel
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - dafi-sentinel-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  dafi-sentinel-pgdata:
