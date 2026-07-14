@@ -10,6 +10,7 @@ deterministic and easy to seed from tests.
 from __future__ import annotations
 
 import base64
+import secrets
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -27,6 +28,19 @@ from dafi_sentinel.domain.models import (
 from dafi_sentinel.ml.analysis import rank_similarity
 from dafi_sentinel.retrieval.contracts import InMemoryRetrievalIndex
 from dafi_sentinel.storage.contracts import AuditRepository, EvidenceRepository
+
+
+def new_audit_id() -> str:
+    """Return a unique audit record id.
+
+    Re-execution of the same flow (e.g., re-invoking the LangGraph
+    orchestration with the same ``session_id``) MUST NOT collide on the
+    audit id. The 4R review (CRIT-5) caught two deterministic id schemes
+    that fail under retry or FastAPI's sync threadpool; we use
+    :func:`secrets.token_hex` so the id is unique per call and cheap to
+    generate without dragging in a UUID dependency.
+    """
+    return f"audit-{secrets.token_hex(8)}"
 
 
 @dataclass
@@ -267,7 +281,7 @@ class WorkbenchService:
         from dafi_sentinel.domain.models import ActorRef, PolicyDecision
 
         record = AuditRecord(
-            id=f"audit-{session_id}-{action}-{len(self.audits.all()) + 1}",  # type: ignore[attr-defined]
+            id=new_audit_id(),
             actor=ActorRef(id=actor_id, kind="user"),
             action=action,
             decision=PolicyDecision(allowed=allowed, reason=reason),

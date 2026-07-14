@@ -325,3 +325,46 @@ def test_orchestration_state_is_typed_and_total_false():
     assert "decision_reason" in annotations
     assert "chart_png" in annotations
     assert "audit_records" in annotations
+
+
+# --------------------------------------------------------------------------- #
+# Audit id uniqueness — re-execution must not collide (CRIT-5)
+# --------------------------------------------------------------------------- #
+
+
+def test_orchestration_audit_ids_are_unique_across_re_invocations():
+    """Re-invoking the same graph with the same session_id must yield distinct audit ids.
+
+    The 4R review (CRIT-5, R1-003=R4-001) caught the prior
+    ``audit-orchestration-{session_id}-{action}`` scheme: re-running the
+    graph would either crash the audit repository on the duplicate id or
+    silently overwrite the prior record. The fix swaps the deterministic
+    id for a per-call token so re-execution is safe.
+    """
+    workbench, gate, audits = _build_environment()
+    graph = build_investigation_graph(
+        workbench=workbench,
+        gate=gate,
+        audits=audits,
+    )
+
+    first = _run_with_approval(
+        graph,
+        config={"configurable": {"thread_id": "audit-ids-1"}},
+        initial=_initial_state(),
+        approved=True,
+    )
+    second = _run_with_approval(
+        graph,
+        config={"configurable": {"thread_id": "audit-ids-2"}},
+        initial=_initial_state(),
+        approved=True,
+    )
+
+    first_ids = [record["id"] for record in first["audit_records"]]
+    second_ids = [record["id"] for record in second["audit_records"]]
+    assert first_ids, "first run must produce audit records"
+    assert second_ids, "second run must produce audit records"
+    assert set(first_ids).isdisjoint(second_ids), (
+        f"audit ids collided across re-invocations: {first_ids} vs {second_ids}"
+    )

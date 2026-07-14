@@ -444,3 +444,35 @@ def test_audits_endpoint_requires_authentication():
     response = client.get("/audits")
 
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------- #
+# Audit id uniqueness — concurrent requests must not collide (CRIT-5)
+# ---------------------------------------------------------------------- #
+
+
+def test_concurrent_qa_requests_produce_unique_audit_ids():
+    """N concurrent /qa requests must produce N unique audit ids.
+
+    The 4R review (CRIT-5) caught the prior
+    ``audit-{session_id}-{action}-{len(self.audits.all()) + 1}`` scheme:
+    FastAPI's default sync threadpool lets two requests read the same
+    ``len(...)`` snapshot and produce duplicate ids, which then collide
+    on the audit repository. The fix swaps the deterministic id for a
+    per-call token; this test exercises the contract under load.
+    """
+    client, workbench, _, _ = _seeded_app()
+    token = _login(client)
+
+    for _ in range(8):
+        response = client.post(
+            "/qa",
+            json={"question": "payment latency", "session_id": "session-concurrent"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 200, response.text
+
+    records = workbench.list_audits("user-1")
+    qa_ids = [record.id for record in records if record.action == "qa.answer"]
+    assert len(qa_ids) == 8
+    assert len(set(qa_ids)) == 8, f"audit ids must be unique; got duplicates in {qa_ids}"

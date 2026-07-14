@@ -42,7 +42,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from dafi_sentinel.api.services import WorkbenchService
+from dafi_sentinel.api.services import WorkbenchService, new_audit_id
 from dafi_sentinel.domain.models import ActorRef, AuditRecord, PolicyDecision
 from dafi_sentinel.security.policy import SecurityGate
 from dafi_sentinel.storage.contracts import AuditRepository
@@ -416,7 +416,7 @@ def _build_audit_record(
     role_context: tuple[str, ...],
 ) -> AuditRecord:
     return AuditRecord(
-        id=f"audit-orchestration-{session_id}-{action}",
+        id=new_audit_id(),
         actor=actor,
         action=action,
         decision=decision,
