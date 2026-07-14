@@ -18,18 +18,28 @@ strict_tdd_evidence:
 testing:
   detected: 2026-07-14
   strict_tdd: true
-  runtime_observed: "uv run pytest used Python 3.14.6 while .python-version requests 3.13"
+  runtime_observed: "uv run pytest uses Python 3.13.13 via .venv after the PR3 shebang repair"
   primary_commands:
     - scope: dafi_sentinel
       command: "uv run pytest"
       status: detected
+      notes: "Default run; pgvector smoke is skipped without DAFI_PGVECTOR_SMOKE."
+    - scope: dafi_sentinel
+      command: "DAFI_PGVECTOR_SMOKE=1 DAFI_PGVECTOR_DSN=postgresql://sentinel:sentinel@127.0.0.1:55432/sentinel uv run pytest"
+      status: detected
+      notes: "PR3 pgvector smoke against the Podman Compose stack at infra/podman/compose.yaml."
+    - scope: dafi_sentinel
+      command: "podman compose -f infra/podman/compose.yaml up -d"
+      status: detected
+      notes: "Spins up the local PostgreSQL + pgvector service used by the PR3 smoke."
   layers:
     unit:
       available: true
       tools: [pytest]
     integration:
-      available: false
-      tools: []
+      available: true
+      tools: [pytest, podman-compose, pgvector]
+      notes: "PR3 integration layer is the pgvector smoke test gated on DAFI_PGVECTOR_SMOKE=1."
     e2e:
       available: false
       tools: []

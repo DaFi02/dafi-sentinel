@@ -29,7 +29,7 @@
 - [x] 2.1 PR2 add RED/GREEN ingestion tests/services for valid datasets, malformed rollback, traceability, redaction handoff.
 - [x] 2.1a PR2 add standalone valid incident, malformed row, runbook/document, and prompt-injection fixtures removed from PR1 to stay under review budget.
 - [x] 2.2 PR2 add RED/GREEN security tests/services for injection-as-data, policy refusal, redaction, role-based tool authorization, approvals, audits.
-- [ ] 3.1 PR3 add `uv add psycopg[binary] pgvector`, `infra/podman/compose.yaml`, docs, and pgvector adapter smoke.
+- [x] 3.1 PR3 add `uv add psycopg[binary] pgvector`, `infra/podman/compose.yaml`, docs, and pgvector adapter smoke.
 - [ ] 4.1 PR4 add `uv add scikit-learn numpy`, deterministic analysis, chart validation, and controlled matplotlib renderer.
 - [ ] 5.1 PR5 add FastAPI auth/session middleware and endpoints for owned sessions, evidence, Q&A, charts, roles, audits.
 - [ ] 5.2 PR5 add React + TypeScript + Vite dashboard with authenticated ownership, TanStack Query, and Recharts.
