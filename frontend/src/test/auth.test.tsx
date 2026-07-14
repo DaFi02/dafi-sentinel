@@ -145,6 +145,13 @@ describe("auth gate", () => {
       expect(screen.getByRole("heading", { name: /sign in/i })).toBeInTheDocument();
     });
 
+    // R2 med: the form is no longer pre-filled. The user MUST type
+    // the credentials before the submit button is enabled.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/username/i), { target: { value: "ada" } });
+      fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "hunter2!" } });
+    });
+
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
     });
@@ -171,6 +178,12 @@ describe("auth gate", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /sign in/i })).toBeInTheDocument();
+    });
+
+    // R2 med: the form requires explicit input now.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/username/i), { target: { value: "ada" } });
+      fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "wrong" } });
     });
 
     await act(async () => {
