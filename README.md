@@ -75,6 +75,29 @@ uv run uvicorn dafi_sentinel.api.app:default_workbench_app --reload
 uv run python -c "from dafi_sentinel.api.app import create_workbench_app; print(create_workbench_app.__doc__)"
 ```
 
+> R4 crit#1: ``default_workbench_app`` is a **dev-only** factory. It
+> disables ``cookie_secure``, uses an in-memory user store, and
+> generates a random on-boot password for the seeded users. It
+> refuses to start when the ``DAFI_PRODUCTION_POSTURE=1`` env var
+> is set so a misconfiguration (e.g., a production deploy that
+> accidentally re-uses the dev factory) fails fast at boot.
+>
+> **Production posture** — set ``DAFI_PRODUCTION_POSTURE=1`` and use
+> :func:`dafi_sentinel.api.app.create_workbench_app` with a real
+> user store and ``cookie_secure=True``:
+
+```bash
+# 1. Generate a stable dev-only password (skip in CI):
+export DAFI_DEV_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(16))')"
+
+# 2. Run the dev server:
+uv run uvicorn dafi_sentinel.api.app:default_workbench_app --reload
+
+# 3. In production, set DAFI_PRODUCTION_POSTURE=1 to refuse the dev factory:
+export DAFI_PRODUCTION_POSTURE=1
+uv run gunicorn myapp:create_production_app  # the dev factory raises RuntimeError
+```
+
 The API surface is:
 
 | Method | Path | Auth | Purpose |
