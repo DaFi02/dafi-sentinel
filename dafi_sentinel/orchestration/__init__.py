@@ -21,6 +21,7 @@ from dafi_sentinel.orchestration.graph import (
     build_investigation_graph,
     sweep_stale_pauses,
 )
+from dafi_sentinel.orchestration.production_graph import production_graph
 
 # Public re-exports — the dashboard and CLI tools can import the
 # orchestration primitives from the package root. The implementation
@@ -32,5 +33,6 @@ __all__ = [
     "InvestigationState",
     "WorkbenchService",
     "build_investigation_graph",
+    "production_graph",
     "sweep_stale_pauses",
 ]
