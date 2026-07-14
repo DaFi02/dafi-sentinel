@@ -208,7 +208,10 @@ def create_workbench_app(
                 allow_headers=["Authorization", "Content-Type"],
             )
         # HSTS via a tiny custom middleware so the response header
-        # survives even when uvicorn terminates TLS upstream.
+        # survives even when uvicorn terminates TLS upstream. The same
+        # middleware also pins ``Cache-Control: no-store`` on the
+        # sensitive endpoints (PR-C.7, R1 high#4) so a browser (or an
+        # intermediate proxy) cannot keep the response on disk.
         @app.middleware("http")
         async def _hsts_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
             response = await call_next(request)
@@ -216,6 +219,8 @@ def create_workbench_app(
                 "Strict-Transport-Security",
                 f"max-age={hsts_max_age_seconds}; includeSubDomains",
             )
+            if request.url.path.startswith("/sessions") or request.url.path == "/audits":
+                response.headers["Cache-Control"] = "no-store"
             return response
 
     # PR-C.4 (R1 high#3): rate limits and payload-size caps on the
