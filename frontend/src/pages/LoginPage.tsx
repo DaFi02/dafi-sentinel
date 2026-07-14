@@ -10,8 +10,14 @@ export function LoginPage() {
   const { session, login, hydrated } = useSession();
   const navigate = useNavigate();
   const location = useLocation();
-  const [username, setUsername] = useState("ada");
-  const [password, setPassword] = useState("hunter2!");
+  // R2 med: the prior form pre-filled the seeded analyst credentials
+  // (``ada`` / ``hunter2!``) so anyone opening the dev server could
+  // sign in with a single click. The dev seed is documented in the
+  // README (use ``DAFI_DEV_PASSWORD`` to pin a stable credential),
+  // but the form no longer surfaces the plaintext. The user MUST
+  // type the username and password themselves.
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -49,7 +55,7 @@ export function LoginPage() {
   return (
     <main>
       <h2>Sign in</h2>
-      <p className="muted">Use the seeded analyst (ada / hunter2!) or maintainer (mike / correct horse) account.</p>
+      <p className="muted">Enter the credentials supplied by your operator. The dev server logs the seeded password on boot (see the README).</p>
       <form onSubmit={(event) => void onSubmit(event)}>
         <label htmlFor="username">username</label>
         <input
@@ -68,7 +74,7 @@ export function LoginPage() {
           onChange={(event) => setPassword(event.target.value)}
           autoComplete="current-password"
         />
-        <button className="button" type="submit" disabled={pending}>
+        <button className="button" type="submit" disabled={pending || !username || !password}>
           {pending ? "signing in…" : "sign in"}
         </button>
       </form>

@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import base64
 import secrets
-from collections import deque
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from dafi_sentinel.api.audit_enums import AuditAction, AuditReason
 from dafi_sentinel.charts.renderer import render_chart
 from dafi_sentinel.charts.validation import validate_chart_spec
 from dafi_sentinel.domain.models import (
@@ -26,7 +27,7 @@ from dafi_sentinel.domain.models import (
     RedactedIncidentRecord,
 )
 from dafi_sentinel.ml.analysis import rank_similarity
-from dafi_sentinel.retrieval.contracts import InMemoryRetrievalIndex
+from dafi_sentinel.retrieval.contracts import InMemoryRetrievalIndex, RetrievalIndex
 from dafi_sentinel.storage.contracts import AuditRepository, EvidenceRepository
 
 
@@ -45,24 +46,36 @@ def new_audit_id() -> str:
 
 @dataclass
 class InMemoryEvidenceRepository:
-    """Flattened evidence store keyed by evidence id.
+    """In-memory implementation of the ``EvidenceRepository`` hexagonal port.
 
     The ingestion service writes :class:`RedactedIncidentRecord` rows into
-    a per-session list. The API needs a flat ``evidence_id -> record``
-    view to support the ``GET /evidence/{evidence_id}`` endpoint. We
-    keep the flat index in sync with the per-session list.
+    a per-owner index; the API exposes the same view to the
+    ``GET /evidence/{evidence_id}`` endpoint. The class is a structural
+    implementation of :class:`dafi_sentinel.storage.contracts.EvidenceRepository`
+    (the 4R review, R2 crit#5, caught the prior asymmetry between this
+    concrete class and the Protocol that WorkbenchService declared).
+    Method names match the Protocol verbatim so an ``isinstance`` check
+    (``@runtime_checkable`` on the Protocol) works without monkey-patching.
+
+    PR-C.10 (R1 med#9, R4 high#6): every mutation acquires the
+    ``_lock`` so two threads racing to write the same evidence id do
+    not clobber each other. Reads stay lock-free (Python's GIL keeps
+    the dict operations atomic for the single-step ``get`` / iteration
+    patterns we use).
     """
 
     _records: dict[str, RedactedIncidentRecord] = field(default_factory=dict)
     _owners: dict[str, str] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
-    def save(self, owner_id: str, record: RedactedIncidentRecord) -> EvidenceRef:
+    def save_evidence(self, owner_id: str, record: RedactedIncidentRecord) -> EvidenceRef:
         evidence_id = record.evidence_ref.evidence_id
-        self._records[evidence_id] = record
-        self._owners[evidence_id] = owner_id
+        with self._lock:
+            self._records[evidence_id] = record
+            self._owners[evidence_id] = owner_id
         return record.evidence_ref
 
-    def get(self, evidence_id: str) -> RedactedIncidentRecord | None:
+    def get_evidence(self, evidence_id: str) -> RedactedIncidentRecord | None:
         return self._records.get(evidence_id)
 
     def owner_of(self, evidence_id: str) -> str | None:
@@ -78,43 +91,58 @@ class InMemoryEvidenceRepository:
 
 @dataclass
 class InMemoryAuditRepository:
-    """Audit repository that records every decision in memory.
+    """In-memory implementation of the ``AuditRepository`` hexagonal port.
 
-    Stores a chronological list and an index keyed by ``actor_id`` so the
-    API can serve ``GET /audits`` cheaply. The repository is shared
-    between the API and the security gate; the gate keeps writing to its
-    own ``AuditSink`` for policy decisions while the API writes its own
-    audit records for login/logout/Q&A/chart actions.
+    Stores a chronological list and an index keyed by
+    ``(actor_id, session_id)`` so the API can serve both
+    ``GET /audits`` (per-actor, cross-session) and per-session slices
+    cheaply. The 4R review (R2 crit#7) caught the prior implementation
+    dropping the ``session_id`` argument on the floor; the fix surfaces
+    it on a secondary index so reviewers can reconstruct a single
+    session's audit trail without scanning every record for the actor.
+
+    The repository is shared between the API and the security gate; the
+    gate keeps writing to its own :class:`AuditSink` for policy
+    decisions while the API writes its own audit records for
+    login/logout/Q&A/chart actions.
+
+    PR-C.10 (R1 med#9, R4 high#6): every mutation acquires the
+    ``_lock`` so two threads racing to write audit records do not
+    leave the primary list and the secondary indexes inconsistent.
+    Reads stay lock-free for the same reason as the evidence
+    repository.
     """
 
     _records: list[AuditRecord] = field(default_factory=list)
     _by_actor: dict[str, list[str]] = field(default_factory=dict)
+    _by_session: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def write_audit(self, session_id: str, record: AuditRecord) -> None:
-        self._records.append(record)
-        self._by_actor.setdefault(record.actor.id, []).append(record.id)
+        with self._lock:
+            self._records.append(record)
+            self._by_actor.setdefault(record.actor.id, []).append(record.id)
+            self._by_session.setdefault((record.actor.id, session_id), []).append(record.id)
 
     def list_for_actor(self, actor_id: str) -> tuple[AuditRecord, ...]:
         ids = self._by_actor.get(actor_id, [])
         index = {record.id: record for record in self._records}
         return tuple(index[record_id] for record_id in ids if record_id in index)
 
+    def list_for_session(self, actor_id: str, session_id: str) -> tuple[AuditRecord, ...]:
+        """Return the audit records for a single ``(actor_id, session_id)`` pair.
+
+        R2 crit#7: a per-session slice lets a reviewer reconstruct the
+        audit trail of one investigation without re-walking every
+        record for the actor. The order is chronological within the
+        session (insertion order, same as :meth:`list_for_actor`).
+        """
+        ids = self._by_session.get((actor_id, session_id), [])
+        index = {record.id: record for record in self._records}
+        return tuple(index[record_id] for record_id in ids if record_id in index)
+
     def all(self) -> tuple[AuditRecord, ...]:
         return tuple(self._records)
-
-
-class EvidenceRepositoryAdapter:
-    """Adapt :class:`InMemoryEvidenceRepository` to the ``EvidenceRepository`` protocol."""
-
-    def __init__(self, store: InMemoryEvidenceRepository, owner_id: str) -> None:
-        self._store = store
-        self._owner_id = owner_id
-
-    def save_evidence(self, record: RedactedIncidentRecord) -> EvidenceRef:
-        return self._store.save(self._owner_id, record)
-
-    def get_evidence(self, evidence_id: str) -> RedactedIncidentRecord | None:
-        return self._store.get(evidence_id)
 
 
 @dataclass(frozen=True)
@@ -139,13 +167,63 @@ class WorkbenchService:
     FastAPI handlers stay thin. Every method that performs a stateful
     action also writes an :class:`AuditRecord` to the shared audit
     repository.
+
+    The ``clock`` parameter (R3 F2) is the seam replay-based review
+    relies on: when the orchestrator or a test injects a fixed callable,
+    every audit record produced by the service carries that timestamp
+    so reviewers can reconstruct the order of related events. The
+    default (``datetime.now(UTC)``) keeps the contract identical to the
+    pre-fix behavior so existing callers do not need to change.
     """
 
-    evidence: InMemoryEvidenceRepository
+    evidence: EvidenceRepository
+    """Evidence port widened to the ``EvidenceRepository`` Protocol (R2 crit#5).
+
+    The concrete :class:`InMemoryEvidenceRepository` implementation is the
+    only one shipped today, but a future Postgres-backed adapter can be
+    swapped in without changing this service. The ``@runtime_checkable``
+    decorator on the Protocol (see :mod:`dafi_sentinel.storage.contracts`)
+    turns the type annotation into a runtime ``isinstance`` check at
+    construction time so a misconfigured adapter fails fast.
+    """
+
     audits: AuditRepository
     documents: tuple[Document, ...] = ()
+    retrieval_index: RetrievalIndex | None = None
+    """Retrieval port widened to the ``RetrievalIndex`` Protocol (R2 crit#6).
 
-    def _index(self) -> InMemoryRetrievalIndex:
+    When the workbench service is constructed without an explicit
+    ``retrieval_index`` (e.g., from the dev ``default_workbench_app``
+    factory), :meth:`_index` falls back to a fresh
+    :class:`InMemoryRetrievalIndex` built from ``self.documents`` so the
+    call site stays untouched. Production wiring injects a
+    ``RetrievalIndex`` (e.g., a pgvector-backed adapter) and the
+    workbench service uses it directly, sharing the same instance across
+    requests when desired.
+    """
+
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        # R2 crit#5: belt-and-braces guard. The ``@runtime_checkable``
+        # decorator on the Protocol lets us fail fast on a misconfigured
+        # adapter at construction time instead of crashing on the first
+        # request. ``AuditRepository`` carries the same guarantee; the
+        # asymmetry was caught by the 4R review (R2 med).
+        if not isinstance(self.evidence, EvidenceRepository):
+            raise TypeError(
+                f"WorkbenchService.evidence must implement EvidenceRepository; "
+                f"got {type(self.evidence).__name__}"
+            )
+        if not isinstance(self.audits, AuditRepository):
+            raise TypeError(
+                f"WorkbenchService.audits must implement AuditRepository; "
+                f"got {type(self.audits).__name__}"
+            )
+
+    def _index(self) -> RetrievalIndex:
+        if self.retrieval_index is not None:
+            return self.retrieval_index
         return InMemoryRetrievalIndex(self.documents)
 
     def seed_documents(self, documents: Sequence[Document]) -> None:
@@ -159,7 +237,7 @@ class WorkbenchService:
         return self.evidence.list_for_owner(owner_id)
 
     def get_evidence(self, owner_id: str, evidence_id: str) -> RedactedIncidentRecord:
-        record = self.evidence.get(evidence_id)
+        record = self.evidence.get_evidence(evidence_id)
         if record is None:
             raise LookupError(f"evidence not found: {evidence_id}")
         owner = self.evidence.owner_of(evidence_id)
@@ -201,7 +279,7 @@ class WorkbenchService:
                 CitedEvidenceWithScore(
                     ref=EvidenceRef(
                         evidence_id=match.evidence_id,
-                        source=self.evidence.get(match.evidence_id).source,  # type: ignore[union-attr]
+                        source=self.evidence.get_evidence(match.evidence_id).source,  # type: ignore[union-attr]
                     ),
                     score=match.score,
                 )
@@ -212,9 +290,9 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id=session_id,
-            action="qa.answer",
+            action=AuditAction.QA_ANSWER,
             allowed=bool(cited),
-            reason=("evidence cited" if cited else "no supporting evidence"),
+            reason=(AuditReason.EVIDENCE_CITED if cited else AuditReason.NO_SUPPORTING_EVIDENCE),
             role_context=(owner_id,),
         )
         return answer, cited
@@ -222,7 +300,7 @@ class WorkbenchService:
     def _records_for(self, evidence_refs: Sequence[EvidenceRef]) -> tuple[RedactedIncidentRecord, ...]:
         records: list[RedactedIncidentRecord] = []
         for ref in evidence_refs:
-            record = self.evidence.get(ref.evidence_id)
+            record = self.evidence.get_evidence(ref.evidence_id)
             if record is not None:
                 records.append(record)
         return tuple(records)
@@ -254,7 +332,7 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id="chart",
-            action="chart.render",
+            action=AuditAction.CHART_RENDER,
             allowed=True,
             reason=f"chart {spec.kind} rendered with {len(spec.evidence_ids)} evidence ids",
             role_context=(owner_id,),
@@ -273,9 +351,9 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id=session_id,
-            action="session.login",
+            action=AuditAction.SESSION_LOGIN,
             allowed=True,
-            reason="login succeeded",
+            reason=AuditReason.LOGIN_SUCCEEDED,
             role_context=(),
         )
 
@@ -283,9 +361,9 @@ class WorkbenchService:
         self._record_audit(
             actor_id=actor_id,
             session_id=session_id,
-            action="session.logout",
+            action=AuditAction.SESSION_LOGOUT,
             allowed=True,
-            reason="logout succeeded",
+            reason=AuditReason.LOGOUT_SUCCEEDED,
             role_context=(),
         )
 
@@ -306,7 +384,7 @@ class WorkbenchService:
             actor=ActorRef(id=actor_id, kind="user"),
             action=action,
             decision=PolicyDecision(allowed=allowed, reason=reason),
-            timestamp=datetime.now(UTC),
+            timestamp=self.clock(),
             role_context=role_context,
         )
         self.audits.write_audit(session_id, record)
@@ -314,27 +392,3 @@ class WorkbenchService:
 
 def png_to_base64(png_bytes: bytes) -> str:
     return base64.b64encode(png_bytes).decode("ascii")
-
-
-def base64_to_png(payload: str) -> bytes:
-    return base64.b64decode(payload.encode("ascii"))
-
-
-@dataclass
-class RecentEvidenceCache:
-    """Tiny LRU-ish helper that keeps the most recent evidence ids in
-    stable order. Currently unused by the workbench surface but kept for
-    testability of session-relative evidence lists."""
-
-    capacity: int = 32
-    _items: deque[str] = field(default_factory=deque)
-
-    def push(self, evidence_id: str) -> None:
-        if evidence_id in self._items:
-            self._items.remove(evidence_id)
-        self._items.append(evidence_id)
-        while len(self._items) > self.capacity:
-            self._items.popleft()
-
-    def snapshot(self) -> tuple[str, ...]:
-        return tuple(self._items)

@@ -23,8 +23,16 @@ dependencies = [
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests/dafi_sentinel"]
+# R3 F1: harden the test runner so a forgotten ``pytest.mark.skip`` /
+# ``xfail`` cannot silently shrink the suite. Pytest 8+ already treats
+# ``pytest.mark.only`` as a hard failure by default, so the
+# ``--strict-markers`` / ``--strict-config`` pair and the
+# ``-p no:cacheprovider`` plugin toggle cover the parallel intent
+# of vitest's ``forbidOnly: true``.
+addopts = ["--strict-markers", "--strict-config", "-p", "no:cacheprovider", "--tb=short", "-ra"]

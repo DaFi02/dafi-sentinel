@@ -81,7 +81,7 @@ def _build_environment() -> tuple[WorkbenchService, SecurityGate, InMemoryAuditR
         redacted_summary="Payment timeout crossed alert threshold",
         fields={"severity": "critical"},
     )
-    workbench.evidence.save("user-1", record)
+    workbench.evidence.save_evidence("user-1", record)
 
     gate = SecurityGate(
         redactor=RedactionService(),
@@ -498,8 +498,13 @@ def test_orchestration_sweeps_stale_paused_graphs_after_ttl():
     denial decision so the finalize node writes the
     ``approval-timeout`` audit reason and the operator can see which
     investigations were abandoned.
+
+    R3 F6: the prior test used ``time.sleep(0.01)`` to make the
+    freshly-paused checkpoint appear stale. The fix threads a
+    ``clock`` parameter through the sweeper so the test advances
+    "now" deterministically without a real-time sleep.
     """
-    import time
+    from datetime import UTC, datetime, timedelta
 
     from dafi_sentinel.orchestration.graph import sweep_stale_pauses
 
@@ -518,14 +523,16 @@ def test_orchestration_sweeps_stale_paused_graphs_after_ttl():
     assert "__interrupt__" in paused
     assert graph.get_state(config) is not None
 
-    # The TTL is 0 seconds: the paused thread is immediately stale.
-    # The sweeper resumes it with a denial, the finalize node records
-    # ``approval-timeout``, and the chart is not rendered.
-    time.sleep(0.01)  # ensure the checkpoint timestamp is older than the TTL
+    # The TTL is 0 seconds and the clock is advanced one hour past
+    # the wall clock: the paused thread is comfortably stale. The
+    # injected clock replaces the prior ``time.sleep(0.01)`` so the
+    # test is robust against slow CI runners.
+    future_now = datetime.now(UTC) + timedelta(hours=1)
     swept = sweep_stale_pauses(
         graph,
         thread_ids=["ttl-1"],
         ttl_seconds=0,
+        clock=lambda: future_now,
     )
     assert swept == 1, f"sweeper should sweep exactly the stale thread; got {swept}"
 

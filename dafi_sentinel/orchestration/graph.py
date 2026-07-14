@@ -42,10 +42,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from dafi_sentinel.api.audit_enums import AuditAction, AuditReason
 from dafi_sentinel.api.services import WorkbenchService, new_audit_id
 from dafi_sentinel.domain.models import ActorRef, AuditRecord, Permission, PolicyDecision, Role, UserRef
 from dafi_sentinel.security.policy import SecurityGate
-from dafi_sentinel.storage.contracts import AuditRepository
+from dafi_sentinel.storage.contracts import ActorStore, AuditRepository
 
 
 # --------------------------------------------------------------------------- #
@@ -75,6 +76,18 @@ The CRIT-2 fix enforces this permission on the approver (not just
 separation of duties) so a low-privilege user cannot grant controlled
 actions.
 """
+
+
+# R3 F8: the system approver identity used by the CRIT-6 sweeper is
+# declared before its first reference so the module reads top-down
+# without a forward-declaration dance. The role carries the
+# ``approval:grant`` permission so the authorization check passes
+# when the sweeper resumes a paused graph.
+_SYSTEM_APPROVER = UserRef(
+    id="system",
+    display_name="System",
+    roles=(Role("system", permissions=(Permission(APPROVER_PERMISSION),)),),
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +161,7 @@ def build_investigation_graph(
     workbench: WorkbenchService,
     gate: SecurityGate,
     audits: AuditRepository,
+    actor_store: ActorStore | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     paused_graph_ttl_seconds: int = 3600,
     clock: Callable[[], datetime] | None = None,
@@ -175,15 +189,24 @@ def build_investigation_graph(
     the compiled graph with this TTL; stale paused threads are
     finalized with ``decision_reason='approval-timeout'`` so the
     audit trail captures abandoned investigations.
+
+    The ``clock`` parameter (R3 F2) is the seam replay-based review
+    relies on: every audit record produced by the inspection, retrieval,
+    approval, render, and finalize nodes is timestamped with
+    ``clock()`` instead of the wall clock. The default preserves the
+    pre-fix behavior (``datetime.now(UTC)``) so existing callers do
+    not need to change.
     """
 
+    effective_clock = clock or (lambda: datetime.now(UTC))
+
     builder = StateGraph(InvestigationState)
-    builder.add_node("inspect", _make_inspect_node(gate, audits))
-    builder.add_node("retrieve", _make_retrieve_node(workbench, audits))
+    builder.add_node("inspect", _make_inspect_node(gate, audits, effective_clock))
+    builder.add_node("retrieve", _make_retrieve_node(workbench, audits, effective_clock))
     builder.add_node("compose_answer", _make_compose_node())
-    builder.add_node("request_approval", _make_approval_node(audits))
-    builder.add_node("render_chart", _make_render_node(workbench, audits))
-    builder.add_node("finalize", _make_finalize_node(audits))
+    builder.add_node("request_approval", _make_approval_node(audits, effective_clock, actor_store))
+    builder.add_node("render_chart", _make_render_node(workbench, audits, effective_clock))
+    builder.add_node("finalize", _make_finalize_node(audits, effective_clock))
 
     builder.add_edge(START, "inspect")
     builder.add_edge("inspect", "retrieve")
@@ -234,17 +257,22 @@ def _actor(state: InvestigationState) -> ActorRef:
     return ActorRef(id=actor_id, kind=cast(Any, kind))
 
 
-def _make_inspect_node(gate: SecurityGate, audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_inspect_node(
+    gate: SecurityGate,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def inspect(state: InvestigationState) -> dict[str, Any]:
         actor = _actor(state)
         decision = gate.inspect_user_request(actor, state["session_id"], state["question"])
 
         record = _build_audit_record(
             actor=actor,
-            action="orchestration.inspect",
+            action=AuditAction.ORCHESTRATION_INSPECT,
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -253,7 +281,11 @@ def _make_inspect_node(gate: SecurityGate, audits: AuditRepository) -> Callable[
     return inspect
 
 
-def _make_retrieve_node(workbench: WorkbenchService, audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_retrieve_node(
+    workbench: WorkbenchService,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def retrieve(state: InvestigationState) -> dict[str, Any]:
         answer, cited = workbench.answer_question(
             actor_id=state["actor_id"],
@@ -266,14 +298,15 @@ def _make_retrieve_node(workbench: WorkbenchService, audits: AuditRepository) ->
         actor = _actor(state)
         decision = PolicyDecision(
             allowed=bool(cited),
-            reason=("evidence cited" if cited else "no supporting evidence"),
+            reason=(AuditReason.EVIDENCE_CITED if cited else AuditReason.NO_SUPPORTING_EVIDENCE),
         )
         record = _build_audit_record(
             actor=actor,
-            action="orchestration.retrieve",
+            action=AuditAction.ORCHESTRATION_RETRIEVE,
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -296,7 +329,11 @@ def _make_compose_node() -> Callable[[InvestigationState], dict[str, Any]]:
     return compose
 
 
-def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_approval_node(
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+    actor_store: ActorStore | None = None,
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def request_approval(state: InvestigationState) -> dict[str, Any]:
         requestor_id = state.get("actor_id") or ""
         # Pause execution and surface the approval prompt to the caller.
@@ -310,88 +347,160 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
         )
         approval = _coerce_approval(resume_value)
 
-        # CRIT-2: enforce separation of duties and the approval:grant
-        # permission on the approver. Without an approver, the resume
-        # is also treated as a denial.
-        if approval.approver is None:
-            decision = PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
-            record = _build_audit_record(
-                actor=ActorRef(id=requestor_id, kind="user"),
-                action="orchestration.approval",
-                decision=decision,
-                session_id=state["session_id"],
-                role_context=(state.get("owner_id") or "",),
-            )
-            audits.write_audit(state["session_id"], record)
-            return {
-                "approval_granted": False,
-                "approval_approver": "",
-                "decision_reason": decision.reason,
-                "audit_records": [_serialize_audit(record)],
-            }
-
-        authz = _evaluate_approver(requestor_id=requestor_id, approver=approval.approver)
-        approver_actor = ActorRef(id=approval.approver.id, kind="user")
-        approver_role_context = tuple(role.name for role in approval.approver.roles)
-
-        if not authz.allowed:
-            # The approver is the requestor (separation of duties) or
-            # does not carry the approval:grant permission. The audit
-            # trail is still attributed to the approver so reviewers
-            # can see who attempted the unauthorized grant.
-            record = _build_audit_record(
-                actor=approver_actor,
-                action="orchestration.approval",
-                decision=authz,
-                session_id=state["session_id"],
-                role_context=approver_role_context,
-            )
-            audits.write_audit(state["session_id"], record)
-            return {
-                "approval_granted": False,
-                "approval_approver": approval.approver.id,
-                "decision_reason": authz.reason,
-                "audit_records": [_serialize_audit(record)],
-            }
-
-        # The CRIT-6 sweeper resumes stale threads with the system
-        # approver. The system approver carries the approval:grant
-        # permission via its implicit role, so the authz check above
-        # passes. We detect the system path and set the decision
-        # reason to ``approval-timeout`` so the audit trail captures
-        # the abandonment.
-        is_timeout = approval.approver.id == _SYSTEM_APPROVER.id
-        decision_reason = (
-            "approval-timeout" if is_timeout
-            else (
-                f"approved-by-{approval.approver.id}" if approval.approved
-                else "approval-denied"
-            )
+        # R2 high#1: split the 4-return-path approval node into named
+        # helpers so each branch is testable in isolation. The control
+        # flow stays identical; the helpers just give names to what was
+        # previously inlined.
+        actor, decision = _check_authorization(
+            requestor_id=requestor_id,
+            approver=approval.approver,
+            approved=approval.approved,
+            actor_store=actor_store,
         )
-        decision = PolicyDecision(
-            allowed=approval.approved and not is_timeout,
-            reason=decision_reason,
-        )
-        record = _build_audit_record(
-            actor=approver_actor,
-            action="orchestration.approval",
+        state_update = _record_approval_decision(
+            audits=audits,
+            clock=clock,
+            state=state,
+            actor=actor,
+            approver=approval.approver,
             decision=decision,
-            session_id=state["session_id"],
-            role_context=approver_role_context,
         )
-        audits.write_audit(state["session_id"], record)
-
-        return {
-            "approval_granted": approval.approved and not is_timeout,
-            "approval_approver": approval.approver.id,
-            "decision_reason": decision_reason,
-            "audit_records": [_serialize_audit(record)],
-        }
+        return state_update
 
     return request_approval
 
 
-def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _check_authorization(
+    *,
+    requestor_id: str,
+    approver: UserRef | None,
+    approved: bool,
+    actor_store: ActorStore | None = None,
+) -> tuple[ActorRef, PolicyDecision]:
+    """Resolve the approver authorization decision for the approval node.
+
+    Returns a ``(actor, decision)`` pair. The ``actor`` is who to
+    attribute the audit record to (the requestor when the resume
+    payload is malformed, the approver otherwise); the ``decision`` is
+    the :class:`PolicyDecision` for that branch.
+
+    The four possible outcomes are:
+
+    1. No approver in the resume payload → unauthorized denial.
+    2. Approver is the requestor (separation of duties) → unauthorized denial.
+    3. Approver lacks the ``approval:grant`` permission → unauthorized denial.
+    4. Sweeper-resumed system approver → timeout denial.
+    5. Otherwise → either approval or refusal, attributed to the approver.
+
+    PR-C.6 (R1 high#2): when ``actor_store`` is supplied, the
+    ``approver`` is replaced by the store-returned ``UserRef`` so a
+    caller cannot forge a permission set. When the store is not
+    supplied (legacy / pre-PR-C.6 call sites), the caller-supplied
+    ``UserRef`` is honored and a ``logger.warning`` makes the gap
+    visible at runtime.
+    """
+    # 1. Missing approver (legacy / malformed resume payload).
+    if approver is None:
+        return (
+            ActorRef(id=requestor_id, kind="user"),
+            PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED),
+        )
+
+    # PR-C.6: replace the caller-supplied approver with the
+    # server-side lookup result. When the store is not supplied the
+    # legacy behavior holds; the warning makes the gap visible so an
+    # operator can wire the store before deploying.
+    canonical_approver = approver
+    if actor_store is not None:
+        resolved = actor_store.get_user(approver.id)
+        if resolved is None:
+            return (
+                ActorRef(id=approver.id, kind="user"),
+                PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED),
+            )
+        canonical_approver = resolved
+    else:
+        logger.warning(
+            "build_investigation_graph was called without an actor_store; "
+            "_check_authorization will trust the caller-supplied UserRef. "
+            "PR-C.6: pass an ActorStore to close the R1 high#2 privilege "
+            "escalation gap."
+        )
+
+    # 2 + 3. Separation of duties and permission check.
+    authz = _evaluate_approver(requestor_id=requestor_id, approver=canonical_approver)
+    if not authz.allowed:
+        return (
+            ActorRef(id=canonical_approver.id, kind="user"),
+            authz,
+        )
+
+    # 4. CRIT-6 sweeper path: the system approver carries the
+    # ``approval:grant`` permission via its implicit role, so the authz
+    # check above passes. Detect the system path and surface the
+    # timeout reason so the audit trail captures the abandonment.
+    if canonical_approver.id == _SYSTEM_APPROVER.id:
+        return (
+            ActorRef(id=canonical_approver.id, kind="user"),
+            PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_TIMEOUT),
+        )
+
+    # 5. Normal human approver: respect the approver's verdict.
+    return (
+        ActorRef(id=canonical_approver.id, kind="user"),
+        PolicyDecision(
+            allowed=approved,
+            reason=(
+                f"approved-by-{canonical_approver.id}" if approved
+                else AuditReason.APPROVAL_DENIED
+            ),
+        ),
+    )
+
+
+def _record_approval_decision(
+    *,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+    state: InvestigationState,
+    actor: ActorRef,
+    approver: UserRef | None,
+    decision: PolicyDecision,
+) -> dict[str, Any]:
+    """Persist the approval audit record and return the state update.
+
+    The audit record is attributed to the supplied ``actor``; the
+    state update carries the ``approval_granted`` / ``approval_approver``
+    / ``decision_reason`` fields the rest of the graph reads. The
+    ``role_context`` falls back to the owner id when the approver is
+    absent so the audit trail still surfaces the requestor.
+    """
+    role_context = (
+        tuple(role.name for role in approver.roles) if approver is not None
+        else (state.get("owner_id") or "",)
+    )
+    record = _build_audit_record(
+        actor=actor,
+        action=AuditAction.ORCHESTRATION_APPROVAL,
+        decision=decision,
+        session_id=state["session_id"],
+        role_context=role_context,
+        clock=clock,
+    )
+    audits.write_audit(state["session_id"], record)
+    return {
+        "approval_granted": decision.allowed,
+        "approval_approver": approver.id if approver is not None else "",
+        "decision_reason": decision.reason,
+        "audit_records": [_serialize_audit(record)],
+    }
+
+
+def _make_render_node(
+    workbench: WorkbenchService,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def render_chart(state: InvestigationState) -> dict[str, Any]:
         from dafi_sentinel.domain.models import ChartSpec
 
@@ -418,10 +527,11 @@ def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> C
             )
             record = _build_audit_record(
                 actor=actor,
-                action="orchestration.render_chart",
+                action=AuditAction.ORCHESTRATION_RENDER_CHART,
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
+                clock=clock,
             )
             audits.write_audit(state["session_id"], record)
             return {
@@ -437,10 +547,11 @@ def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> C
             )
             record = _build_audit_record(
                 actor=actor,
-                action="orchestration.render_chart",
+                action=AuditAction.ORCHESTRATION_RENDER_CHART,
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
+                clock=clock,
             )
             audits.write_audit(state["session_id"], record)
             return {
@@ -452,32 +563,36 @@ def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> C
     return render_chart
 
 
-def _make_finalize_node(audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_finalize_node(
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def finalize(state: InvestigationState) -> dict[str, Any]:
         actor = _actor(state)
         existing_reason = state.get("decision_reason")
         approved = bool(state.get("approval_granted"))
 
-        if existing_reason in {"approval-denied", "no-supporting-evidence"} or str(existing_reason or "").startswith("chart-render-failed"):
-            decision_reason = existing_reason or "approval-denied"
+        if existing_reason in {AuditReason.APPROVAL_DENIED, AuditReason.NO_SUPPORTING_EVIDENCE_DASH} or str(existing_reason or "").startswith("chart-render-failed"):
+            decision_reason = existing_reason or AuditReason.APPROVAL_DENIED
             decision = PolicyDecision(allowed=False, reason=decision_reason)
         elif not state.get("cited"):
-            decision_reason = "no-supporting-evidence"
+            decision_reason = AuditReason.NO_SUPPORTING_EVIDENCE_DASH
             decision = PolicyDecision(allowed=False, reason=decision_reason)
         elif approved:
             approver = state.get("approval_approver") or "unknown"
             decision_reason = f"approved-by-{approver}"
             decision = PolicyDecision(allowed=True, reason=decision_reason)
         else:
-            decision_reason = existing_reason or "approval-denied"
+            decision_reason = existing_reason or AuditReason.APPROVAL_DENIED
             decision = PolicyDecision(allowed=False, reason=decision_reason)
 
         record = _build_audit_record(
             actor=actor,
-            action="orchestration.finalize",
+            action=AuditAction.ORCHESTRATION_FINALIZE,
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -497,10 +612,16 @@ def _make_finalize_node(audits: AuditRepository) -> Callable[[InvestigationState
 def _coerce_approval(value: Any) -> ApprovalRequest:
     """Coerce the resume value (which round-trips through pickle) into an :class:`ApprovalRequest`.
 
-    The CRIT-2 fix expects the approver as a :class:`UserRef` (not a
-    bare id). The helper still tolerates the prior ``approver_id`` shape
-    for backward compatibility with older test fixtures, but treats a
-    missing approver as a self/unauthorized denial downstream.
+    The approver MUST be a :class:`UserRef` (or a dict with the same
+    shape). A missing or malformed approver resolves to ``approver=None``;
+    the approval node then records the decision as
+    ``approval-self-or-unauthorized`` and skips the chart render.
+
+    R2 high#10 / R3 F19: the prior ``approver_id`` fallback accepted a
+    bare string id (without roles) as an approver. The fallback was
+    removed: a missing ``approver`` field now means a denial, and a
+    caller wanting to attribute a decision to a specific human must
+    supply a :class:`UserRef` with the ``approval:grant`` permission.
     """
     if isinstance(value, ApprovalRequest):
         return value
@@ -516,13 +637,7 @@ def _coerce_approval(value: Any) -> ApprovalRequest:
                 roles=approver_value.get("roles") or (),
             )
         else:
-            # Fallback for older fixtures: a bare approver_id string.
-            legacy_id = str(value.get("approver_id") or "")
-            approver = (
-                UserRef(id=legacy_id, display_name=legacy_id, roles=())
-                if legacy_id
-                else None
-            )
+            approver = None
         return ApprovalRequest(approved=bool(value.get("approved", False)), approver=approver)
     return ApprovalRequest(approved=False, approver=None)
 
@@ -538,10 +653,10 @@ def _evaluate_approver(*, requestor_id: str, approver: UserRef) -> PolicyDecisio
     case fired).
     """
     if approver.id == requestor_id:
-        return PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
+        return PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED)
     if not any(role.allows(APPROVER_PERMISSION) for role in approver.roles):
-        return PolicyDecision(allowed=False, reason="approval-self-or-unauthorized")
-    return PolicyDecision(allowed=True, reason="approval-authorized")
+        return PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED)
+    return PolicyDecision(allowed=True, reason=AuditReason.APPROVAL_AUTHORIZED)
 
 
 def _build_audit_record(
@@ -551,13 +666,14 @@ def _build_audit_record(
     decision: PolicyDecision,
     session_id: str,
     role_context: tuple[str, ...],
+    clock: Callable[[], datetime],
 ) -> AuditRecord:
     return AuditRecord(
         id=new_audit_id(),
         actor=actor,
         action=action,
         decision=decision,
-        timestamp=datetime.now(UTC),
+        timestamp=clock(),
         role_context=role_context,
     )
 
@@ -601,13 +717,6 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # Paused-graph TTL sweeper (CRIT-6)
 # --------------------------------------------------------------------------- #
-
-
-_SYSTEM_APPROVER = UserRef(
-    id="system",
-    display_name="System",
-    roles=(Role("system", permissions=(Permission(APPROVER_PERMISSION),)),),
-)
 
 
 def sweep_stale_pauses(

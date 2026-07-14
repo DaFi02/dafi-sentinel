@@ -10,6 +10,12 @@
       and has no need for inline scripts, eval, or remote origins;
       the policy refuses them so an XSS payload cannot exfiltrate the
       session cookie or pivot to a remote command-and-control host.
+
+      R2 high#7: the Vite dev server injects inline scripts for HMR
+      which the strict CSP would block. Set ``DAFI_DEV_NO_CSP_META=1``
+      to suppress the meta tag in dev builds (the
+      ``dafi-csp-toggle`` plugin in vite.config.ts handles the
+      removal). Production builds always keep the strict CSP.
     -->
     <meta
       http-equiv="Content-Security-Policy"

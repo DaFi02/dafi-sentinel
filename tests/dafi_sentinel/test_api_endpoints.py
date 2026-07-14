@@ -61,7 +61,7 @@ def _seeded_app(*, owner_id: str = "user-1", with_docs: bool = True) -> tuple[Te
         redacted_summary="Payment timeout crossed alert threshold",
         fields={"severity": "critical"},
     )
-    evidence.save(owner_id, record)
+    evidence.save_evidence(owner_id, record)
     record2 = RedactedIncidentRecord(
         evidence_ref=EvidenceRef(
             evidence_id="ev-incident-002",
@@ -72,7 +72,7 @@ def _seeded_app(*, owner_id: str = "user-1", with_docs: bool = True) -> tuple[Te
         redacted_summary="Database connection pool exhausted",
         fields={"severity": "high"},
     )
-    evidence.save(owner_id, record2)
+    evidence.save_evidence(owner_id, record2)
 
     if with_docs:
         workbench.seed_documents(
@@ -247,7 +247,7 @@ def test_get_evidence_returns_403_when_record_belongs_to_another_user():
     client, _, _, evidence = _seeded_app()
     ada_token = _login(client)
     # Save a record owned by user-2, but log in as ada and try to read it.
-    evidence.save(
+    evidence.save_evidence(
         "user-2",
         RedactedIncidentRecord(
             evidence_ref=EvidenceRef(
@@ -568,27 +568,75 @@ def test_login_sets_httponly_cookie_and_omits_token_from_body():
     assert "SameSite=strict" in set_cookie, f"cookie must be SameSite=strict: {set_cookie!r}"
 
 
-def test_logout_clears_session_cookie():
-    """Logout MUST clear the session cookie so the browser drops it.
+def test_logout_cookie_is_cleared_in_response():
+    """Logout MUST return a Set-Cookie header that expires the session cookie.
 
-    A 204 with a Set-Cookie that expires the session cookie is the
-    standard pattern. Without this, a stolen cookie would remain valid
-    even after the user clicks logout.
+    A 204 with a Set-Cookie that clears the session is the standard
+    pattern. Without this, a stolen cookie would remain valid even
+    after the user clicks logout.
     """
     client, _, _, _ = _seeded_app()
-    # Login (cookie is set on the client automatically).
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+
+    logout = client.delete("/sessions/me")
+
+    clear_cookie = logout.headers.get("set-cookie", "")
+    assert "dafi_sentinel_session=" in clear_cookie
+    # The clear cookie either has Max-Age=0, an expires in the past,
+    # or an empty value. Any of these makes the browser drop it.
+    assert ("Max-Age=0" in clear_cookie) or ("expires=" in clear_cookie.lower()) or "=;" in clear_cookie
+
+
+def test_logout_response_status_is_204():
+    """Logout returns 204 No Content (the cookie clear is the side effect)."""
+    client, _, _, _ = _seeded_app()
     login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
     assert login.status_code == 201
 
     logout = client.delete("/sessions/me")
 
     assert logout.status_code == 204, logout.text
+
+
+def test_logout_response_body_is_empty():
+    """The 204 logout response has an empty body (no JSON payload)."""
+    client, _, _, _ = _seeded_app()
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+
+    logout = client.delete("/sessions/me")
+
+    assert logout.content == b""
+
+
+def test_logout_response_header_preserves_cookie_attributes():
+    """The Set-Cookie clear MUST carry the same attributes (HttpOnly, SameSite) as the original."""
+    client, _, _, _ = _seeded_app()
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+
+    logout = client.delete("/sessions/me")
+
     clear_cookie = logout.headers.get("set-cookie", "")
-    # The clear cookie either has Max-Age=0 / expires in the past, or
-    # an empty value. Either is acceptable; the contract is that the
-    # browser no longer sends a valid session cookie.
-    assert "dafi_sentinel_session=" in clear_cookie
-    assert ("Max-Age=0" in clear_cookie) or ("expires=" in clear_cookie.lower()) or ("=;" in clear_cookie) or clear_cookie.endswith("=;") or "=;" in clear_cookie
+    # Same security attributes as the original Set-Cookie so the
+    # browser recognises this as the same cookie and applies the clear.
+    assert "HttpOnly" in clear_cookie
+    assert "SameSite=strict" in clear_cookie
+
+
+def test_logout_writes_audit_record():
+    """Logout writes a session.logout audit record so the trail captures the action."""
+    client, workbench, _, _ = _seeded_app()
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+
+    logout = client.delete("/sessions/me")
+    assert logout.status_code == 204
+
+    audits = workbench.list_audits("user-1")
+    actions = [audit.action for audit in audits]
+    assert "session.logout" in actions
 
 
 def test_authenticated_request_via_cookie_works_without_bearer_header():

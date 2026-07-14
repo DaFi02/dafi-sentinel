@@ -14,8 +14,13 @@ from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    # PR-C.5 (R1 high#5): cap the password so a malicious caller
+    # cannot pin a 10 MB string and exhaust the argon2 verifier (the
+    # 4R review caught that the prior field had no upper bound). The
+    # 256-char ceiling is well above any sane password and well below
+    # the size at which argon2's KDF cost becomes an obvious DoS.
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class SessionResponse(BaseModel):
@@ -43,8 +48,12 @@ class EvidenceResponse(BaseModel):
 
 
 class QuestionRequest(BaseModel):
-    question: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
+    # PR-C.5 (R1 high#5): cap the question body so a 100 KB text blob
+    # cannot reach the retrieval pipeline. 2048 chars is well above
+    # the longest real question the dashboard renders and is the
+    # sweet spot the 4R review flagged as the production ceiling.
+    question: str = Field(min_length=1, max_length=2048)
+    session_id: str = Field(min_length=1, max_length=128)
     limit: int = Field(default=5, ge=1, le=50)
 
 
