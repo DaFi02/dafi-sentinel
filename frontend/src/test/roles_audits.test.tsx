@@ -98,6 +98,44 @@ describe("roles page", () => {
     });
   });
 
+  it("does not call setState during render (R2 high#5 / R3 F4)", async () => {
+    // R2 high#5: the prior implementation called setUserId inside the
+    // render body, which triggers React's "Cannot update a component
+    // while rendering a different component" warning. The fix moves
+    // the bootstrap into a useEffect so the state update fires after
+    // the commit. This test pins the contract: no warning is logged.
+    const warnSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
+      "GET /roles/user-1": () =>
+        new Response(
+          JSON.stringify({
+            user_id: "user-1",
+            display_name: "Ada",
+            roles: ["analyst"],
+            permissions: ["tool:search", "chart:request"],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    renderAt(null, "/roles");
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /roles for ada/i })).toBeInTheDocument();
+    });
+
+    // Filter the warnings to the setState-during-render class so a
+    // future console.error from an unrelated test fixture does not
+    // mask a regression.
+    const setStateWarnings = warnSpy.mock.calls.filter((call) => {
+      const first = call[0];
+      return typeof first === "string" && first.includes("Cannot update a component");
+    });
+    expect(setStateWarnings).toEqual([]);
+  });
+
   it("renders the empty state when the actor has no roles or permissions", async () => {
     const fetchStub = makeFetch({
       "GET /sessions/me": seedSessionResponse(),

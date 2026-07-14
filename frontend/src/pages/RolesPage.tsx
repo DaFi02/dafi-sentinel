@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useRoles } from "../api/queries";
 import { useSession } from "../auth/useAuth";
@@ -7,10 +7,18 @@ import { ApiError } from "../api/client";
 export function RolesPage() {
   const { session } = useSession();
   const [userId, setUserId] = useState<string | null>(null);
-  // Session sets the default userId once it hydrates.
-  if (session && userId === null) {
-    setUserId(session.user_id);
-  }
+
+  // R2 high#5 / R3 F4: the prior implementation called ``setUserId``
+  // during render, which is a React anti-pattern (the "Cannot update
+  // a component while rendering" warning + potential render loops in
+  // StrictMode). Bootstrap the userId from the session inside a
+  // ``useEffect`` so the state update fires after the commit.
+  useEffect(() => {
+    if (session && userId === null) {
+      setUserId(session.user_id);
+    }
+  }, [session, userId]);
+
   const roles = useRoles(userId, true);
 
   if (!session) {
