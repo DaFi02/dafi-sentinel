@@ -333,88 +333,123 @@ def _make_approval_node(
         )
         approval = _coerce_approval(resume_value)
 
-        # CRIT-2: enforce separation of duties and the approval:grant
-        # permission on the approver. Without an approver, the resume
-        # is also treated as a denial.
-        if approval.approver is None:
-            decision = PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED)
-            record = _build_audit_record(
-                actor=ActorRef(id=requestor_id, kind="user"),
-                action=AuditAction.ORCHESTRATION_APPROVAL,
-                decision=decision,
-                session_id=state["session_id"],
-                role_context=(state.get("owner_id") or "",),
-                clock=clock,
-            )
-            audits.write_audit(state["session_id"], record)
-            return {
-                "approval_granted": False,
-                "approval_approver": "",
-                "decision_reason": decision.reason,
-                "audit_records": [_serialize_audit(record)],
-            }
-
-        authz = _evaluate_approver(requestor_id=requestor_id, approver=approval.approver)
-        approver_actor = ActorRef(id=approval.approver.id, kind="user")
-        approver_role_context = tuple(role.name for role in approval.approver.roles)
-
-        if not authz.allowed:
-            # The approver is the requestor (separation of duties) or
-            # does not carry the approval:grant permission. The audit
-            # trail is still attributed to the approver so reviewers
-            # can see who attempted the unauthorized grant.
-            record = _build_audit_record(
-                actor=approver_actor,
-                action=AuditAction.ORCHESTRATION_APPROVAL,
-                decision=authz,
-                session_id=state["session_id"],
-                role_context=approver_role_context,
-                clock=clock,
-            )
-            audits.write_audit(state["session_id"], record)
-            return {
-                "approval_granted": False,
-                "approval_approver": approval.approver.id,
-                "decision_reason": authz.reason,
-                "audit_records": [_serialize_audit(record)],
-            }
-
-        # The CRIT-6 sweeper resumes stale threads with the system
-        # approver. The system approver carries the approval:grant
-        # permission via its implicit role, so the authz check above
-        # passes. We detect the system path and set the decision
-        # reason to ``approval-timeout`` so the audit trail captures
-        # the abandonment.
-        is_timeout = approval.approver.id == _SYSTEM_APPROVER.id
-        decision_reason = (
-            AuditReason.APPROVAL_TIMEOUT if is_timeout
-            else (
-                f"approved-by-{approval.approver.id}" if approval.approved
-                else AuditReason.APPROVAL_DENIED
-            )
+        # R2 high#1: split the 4-return-path approval node into named
+        # helpers so each branch is testable in isolation. The control
+        # flow stays identical; the helpers just give names to what was
+        # previously inlined.
+        actor, decision = _check_authorization(
+            requestor_id=requestor_id,
+            approver=approval.approver,
+            approved=approval.approved,
         )
-        decision = PolicyDecision(
-            allowed=approval.approved and not is_timeout,
-            reason=decision_reason,
-        )
-        record = _build_audit_record(
-            actor=approver_actor,
-            action=AuditAction.ORCHESTRATION_APPROVAL,
-            decision=decision,
-            session_id=state["session_id"],
-            role_context=approver_role_context,
+        state_update = _record_approval_decision(
+            audits=audits,
             clock=clock,
+            state=state,
+            actor=actor,
+            approver=approval.approver,
+            decision=decision,
         )
-        audits.write_audit(state["session_id"], record)
-
-        return {
-            "approval_granted": approval.approved and not is_timeout,
-            "approval_approver": approval.approver.id,
-            "decision_reason": decision_reason,
-            "audit_records": [_serialize_audit(record)],
-        }
+        return state_update
 
     return request_approval
+
+
+def _check_authorization(
+    *,
+    requestor_id: str,
+    approver: UserRef | None,
+    approved: bool,
+) -> tuple[ActorRef, PolicyDecision]:
+    """Resolve the approver authorization decision for the approval node.
+
+    Returns a ``(actor, decision)`` pair. The ``actor`` is who to
+    attribute the audit record to (the requestor when the resume
+    payload is malformed, the approver otherwise); the ``decision`` is
+    the :class:`PolicyDecision` for that branch.
+
+    The four possible outcomes are:
+
+    1. No approver in the resume payload → unauthorized denial.
+    2. Approver is the requestor (separation of duties) → unauthorized denial.
+    3. Approver lacks the ``approval:grant`` permission → unauthorized denial.
+    4. Sweeper-resumed system approver → timeout denial.
+    5. Otherwise → either approval or refusal, attributed to the approver.
+    """
+    # 1. Missing approver (legacy / malformed resume payload).
+    if approver is None:
+        return (
+            ActorRef(id=requestor_id, kind="user"),
+            PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_SELF_OR_UNAUTHORIZED),
+        )
+
+    # 2 + 3. Separation of duties and permission check.
+    authz = _evaluate_approver(requestor_id=requestor_id, approver=approver)
+    if not authz.allowed:
+        return (
+            ActorRef(id=approver.id, kind="user"),
+            authz,
+        )
+
+    # 4. CRIT-6 sweeper path: the system approver carries the
+    # ``approval:grant`` permission via its implicit role, so the authz
+    # check above passes. Detect the system path and surface the
+    # timeout reason so the audit trail captures the abandonment.
+    if approver.id == _SYSTEM_APPROVER.id:
+        return (
+            ActorRef(id=approver.id, kind="user"),
+            PolicyDecision(allowed=False, reason=AuditReason.APPROVAL_TIMEOUT),
+        )
+
+    # 5. Normal human approver: respect the approver's verdict.
+    return (
+        ActorRef(id=approver.id, kind="user"),
+        PolicyDecision(
+            allowed=approved,
+            reason=(
+                f"approved-by-{approver.id}" if approved
+                else AuditReason.APPROVAL_DENIED
+            ),
+        ),
+    )
+
+
+def _record_approval_decision(
+    *,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+    state: InvestigationState,
+    actor: ActorRef,
+    approver: UserRef | None,
+    decision: PolicyDecision,
+) -> dict[str, Any]:
+    """Persist the approval audit record and return the state update.
+
+    The audit record is attributed to the supplied ``actor``; the
+    state update carries the ``approval_granted`` / ``approval_approver``
+    / ``decision_reason`` fields the rest of the graph reads. The
+    ``role_context`` falls back to the owner id when the approver is
+    absent so the audit trail still surfaces the requestor.
+    """
+    role_context = (
+        tuple(role.name for role in approver.roles) if approver is not None
+        else (state.get("owner_id") or "",)
+    )
+    record = _build_audit_record(
+        actor=actor,
+        action=AuditAction.ORCHESTRATION_APPROVAL,
+        decision=decision,
+        session_id=state["session_id"],
+        role_context=role_context,
+        clock=clock,
+    )
+    audits.write_audit(state["session_id"], record)
+    return {
+        "approval_granted": decision.allowed,
+        "approval_approver": approver.id if approver is not None else "",
+        "decision_reason": decision.reason,
+        "audit_records": [_serialize_audit(record)],
+    }
 
 
 def _make_render_node(
