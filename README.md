@@ -58,8 +58,72 @@ uv run pytest tests/dafi_sentinel/test_ml_analysis.py \
                tests/dafi_sentinel/test_chart_renderer.py -v
 ```
 
+## Workbench API and dashboard (PR5)
+
+PR5 ships the FastAPI workbench surface and the React + TypeScript +
+Vite dashboard. The Python side lives under ``dafi_sentinel/api/`` and
+the dashboard lives in ``frontend/``.
+
+### Run the API
+
+```bash
+# 1. Start the FastAPI server (default in-memory services, seeded
+#    with one analyst and one maintainer).
+uv run uvicorn dafi_sentinel.api.app:default_workbench_app --reload
+
+# 2. Or build a custom app from your own services:
+uv run python -c "from dafi_sentinel.api.app import create_workbench_app; print(create_workbench_app.__doc__)"
+```
+
+The API surface is:
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST`   | `/sessions`             | none | login; issues a session token |
+| `DELETE` | `/sessions/{token}`     | bearer + path match | logout |
+| `GET`    | `/sessions/me`          | bearer | current user + roles |
+| `GET`    | `/evidence`             | bearer | owned evidence list |
+| `GET`    | `/evidence/{id}`        | bearer | owned evidence detail (404 / 403) |
+| `POST`   | `/qa`                   | bearer | RAG Q&A with cited evidence IDs |
+| `POST`   | `/charts`               | bearer | render a chart, returns PNG base64 |
+| `GET`    | `/roles/{user_id}`      | bearer + ownership | role + permission lookup |
+| `GET`    | `/audits`               | bearer | actor-scoped audit list |
+
+Every stateful action writes an ``AuditRecord`` through the
+``AuditRepository`` contract. The seeded users are:
+
+| user id | display name | username | password | roles |
+|---|---|---|---|---|
+| `user-1` | Analyst    | `ada`  | `hunter2!`     | analyst (tool:search, chart:request) |
+| `user-2` | Maintainer | `mike` | `correct horse`| maintainer (tool:python) |
+
+### Run the dashboard
+
+```bash
+cd frontend
+npm install
+npm run dev      # http://127.0.0.1:5173, proxies /sessions, /evidence,
+                 # /qa, /charts, /roles, /audits to http://127.0.0.1:8000
+```
+
+The dashboard uses TanStack Query for server state, Recharts for
+chart panels, Vitest + Testing Library for component tests, and
+redirects unauthenticated users to ``/login`` via the ``AuthGate``
+wrapper. A 401 or 403 from the workbench server is rendered inline
+on the page that triggered it.
+
+### Run the slice tests
+
+```bash
+# Backend
+uv run pytest tests/dafi_sentinel/test_api_auth.py \
+               tests/dafi_sentinel/test_api_endpoints.py -v
+
+# Frontend
+cd frontend && npm run test && npm run build
+```
+
 ## Later slices
 
-FastAPI, React + TypeScript + Vite, auth middleware, and LangGraph
-arrive in PR5 and PR6. Grafana and Prometheus are explicitly out of
-scope for this product.
+LangGraph orchestration arrives in PR6. Grafana and Prometheus are
+explicitly out of scope for this product.
