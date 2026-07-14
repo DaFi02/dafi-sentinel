@@ -299,7 +299,3 @@ class WorkbenchService:
 
 def png_to_base64(png_bytes: bytes) -> str:
     return base64.b64encode(png_bytes).decode("ascii")
-
-
-def base64_to_png(payload: str) -> bytes:
-    return base64.b64decode(payload.encode("ascii"))
