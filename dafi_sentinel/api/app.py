@@ -438,6 +438,7 @@ def default_workbench_app() -> FastAPI:
 
     from dafi_sentinel.api.auth import AuthService, InMemorySessionStore, InMemoryUserStore
     from dafi_sentinel.domain.models import Permission, Role
+    from dafi_sentinel.retrieval.contracts import InMemoryRetrievalIndex
 
     if os.environ.get("DAFI_PRODUCTION_POSTURE") == "1":
         raise RuntimeError(
@@ -466,6 +467,7 @@ def default_workbench_app() -> FastAPI:
     workbench = WorkbenchService(
         evidence=InMemoryEvidenceRepository(),
         audits=InMemoryAuditRepository(),
+        retrieval_index=InMemoryRetrievalIndex(()),
     )
     return create_workbench_app(
         auth=AuthService(users=users, sessions=InMemorySessionStore()),

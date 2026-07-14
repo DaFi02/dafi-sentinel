@@ -25,7 +25,7 @@ from dafi_sentinel.domain.models import (
     RedactedIncidentRecord,
 )
 from dafi_sentinel.ml.analysis import rank_similarity
-from dafi_sentinel.retrieval.contracts import InMemoryRetrievalIndex
+from dafi_sentinel.retrieval.contracts import InMemoryRetrievalIndex, RetrievalIndex
 from dafi_sentinel.storage.contracts import AuditRepository, EvidenceRepository
 
 
@@ -150,9 +150,24 @@ class WorkbenchService:
 
     audits: AuditRepository
     documents: tuple[Document, ...] = ()
+    retrieval_index: RetrievalIndex | None = None
+    """Retrieval port widened to the ``RetrievalIndex`` Protocol (R2 crit#6).
+
+    When the workbench service is constructed without an explicit
+    ``retrieval_index`` (e.g., from the dev ``default_workbench_app``
+    factory), :meth:`_index` falls back to a fresh
+    :class:`InMemoryRetrievalIndex` built from ``self.documents`` so the
+    call site stays untouched. Production wiring injects a
+    ``RetrievalIndex`` (e.g., a pgvector-backed adapter) and the
+    workbench service uses it directly, sharing the same instance across
+    requests when desired.
+    """
+
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
 
-    def _index(self) -> InMemoryRetrievalIndex:
+    def _index(self) -> RetrievalIndex:
+        if self.retrieval_index is not None:
+            return self.retrieval_index
         return InMemoryRetrievalIndex(self.documents)
 
     def seed_documents(self, documents: Sequence[Document]) -> None:
