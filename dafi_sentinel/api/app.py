@@ -19,6 +19,8 @@ All endpoints enforce session ownership through the
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
 from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -31,6 +33,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+
+
+# PR-C.9 (R4 high#4): wire logging at module import so the reference
+# ``uvicorn dafi_sentinel.api.app:default_workbench_app`` command
+# actually emits logs. The basicConfig only fires when the root
+# logger has no handlers, so a test that explicitly configures
+# logging (caplog) is left alone.
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+logger = logging.getLogger(__name__)
 
 from dafi_sentinel.api.auth import (
     AuthService,
@@ -222,6 +237,21 @@ def create_workbench_app(
             if request.url.path.startswith("/sessions") or request.url.path == "/audits":
                 response.headers["Cache-Control"] = "no-store"
             return response
+
+    # PR-C.9 (R4 high#4): attach a request_id (UUID4) to every
+    # request so handlers can include it in audit records, and echo
+    # it on the response via ``X-Request-ID`` so the dashboard (and
+    # any upstream tracing) can correlate the request. A
+    # caller-supplied ``X-Request-ID`` is preserved when present so
+    # a load balancer or the dashboard can pin the id itself.
+    @app.middleware("http")
+    async def _request_id_middleware(request: Request, call_next: Callable[[Request], Any]) -> Any:
+        supplied = request.headers.get("X-Request-ID")
+        request_id = supplied if supplied else str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     # PR-C.4 (R1 high#3): rate limits and payload-size caps on the
     # public mutation endpoints (``/sessions``, ``/qa``, ``/charts``).
