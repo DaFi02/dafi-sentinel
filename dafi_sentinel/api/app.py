@@ -29,6 +29,7 @@ from dafi_sentinel.api.auth import (
     InvalidCredentialsError,
     Session,
     StoredUser,
+    hash_session_id,
     require_owner,
 )
 from dafi_sentinel.api.schemas import (
@@ -131,7 +132,15 @@ def create_workbench_app(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
         stored = auth.users.find_by_id(session.user_id)
         assert stored is not None  # login guarantees a stored user
-        workbench.record_login(actor_id=stored.user.id, session_id=session.token[:8])
+        # R3 F18: hash the session token so the audit log carries an
+        # opaque handle instead of the first 8 characters of the raw
+        # token. The HttpOnly cookie transport stays the source of
+        # truth for the live session; the audit log only needs a
+        # stable correlation id.
+        workbench.record_login(
+            actor_id=stored.user.id,
+            session_id=hash_session_id(session.token),
+        )
         # CRIT-1: the session token lives in an HttpOnly+Secure+SameSite=strict
         # cookie. The JSON body MUST NOT carry the token so an XSS payload
         # cannot exfiltrate it. The cookie is the only transport the
@@ -165,7 +174,10 @@ def create_workbench_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
         session, stored = resolved
         auth.logout(token)
-        workbench.record_logout(actor_id=stored.user.id, session_id=session.token[:8])
+        workbench.record_logout(
+            actor_id=stored.user.id,
+            session_id=hash_session_id(session.token),
+        )
         # Build a 204 response that clears the session cookie. The
         # Secure flag must match the original ``Set-Cookie`` for the
         # browser to recognise this as the same cookie.
@@ -197,7 +209,10 @@ def create_workbench_app(
         if bearer != token:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="cannot revoke another user's session")
         auth.logout(token)
-        workbench.record_logout(actor_id=stored.user.id, session_id=session.token[:8])
+        workbench.record_logout(
+            actor_id=stored.user.id,
+            session_id=hash_session_id(session.token),
+        )
         return None
 
     @app.get("/sessions/me", response_model=SessionResponse)

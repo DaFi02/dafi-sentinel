@@ -9,6 +9,7 @@ identity provider) and every authenticated request must resolve to a
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,6 +32,25 @@ def hash_password(plaintext: str) -> str:
 def verify_password(plaintext: str, hashed: str) -> bool:
     """Verify a plaintext password against a stored argon2 hash."""
     return _PASSWORD_CONTEXT.verify(plaintext, hashed)
+
+
+def hash_session_id(token: str, *, length: int = 16) -> str:
+    """Return a stable, opaque handle for the audit log.
+
+    R3 F18: the audit log MUST NOT carry the first 8 characters of
+    the raw session token. A copy of the audit log is enough to
+    fingerprint an active session, which defeats the HttpOnly cookie
+    transport. The fix hashes the token with SHA-256 and keeps the
+    first ``length`` hex characters, so the audit log has an opaque
+    handle that is:
+
+    * Stable for a given token (the hash is deterministic).
+    * Collision-free across the in-process session surface
+      (16 hex chars = 64 bits of entropy).
+    * Distinct from the raw token prefix, so a leaked audit log
+      does not let an attacker reuse the live session.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:length]
 
 
 @dataclass(frozen=True)
