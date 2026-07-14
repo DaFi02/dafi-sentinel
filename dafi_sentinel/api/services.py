@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 import secrets
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -124,11 +124,19 @@ class WorkbenchService:
     FastAPI handlers stay thin. Every method that performs a stateful
     action also writes an :class:`AuditRecord` to the shared audit
     repository.
+
+    The ``clock`` parameter (R3 F2) is the seam replay-based review
+    relies on: when the orchestrator or a test injects a fixed callable,
+    every audit record produced by the service carries that timestamp
+    so reviewers can reconstruct the order of related events. The
+    default (``datetime.now(UTC)``) keeps the contract identical to the
+    pre-fix behavior so existing callers do not need to change.
     """
 
     evidence: InMemoryEvidenceRepository
     audits: AuditRepository
     documents: tuple[Document, ...] = ()
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
 
     def _index(self) -> InMemoryRetrievalIndex:
         return InMemoryRetrievalIndex(self.documents)
@@ -291,7 +299,7 @@ class WorkbenchService:
             actor=ActorRef(id=actor_id, kind="user"),
             action=action,
             decision=PolicyDecision(allowed=allowed, reason=reason),
-            timestamp=datetime.now(UTC),
+            timestamp=self.clock(),
             role_context=role_context,
         )
         self.audits.write_audit(session_id, record)

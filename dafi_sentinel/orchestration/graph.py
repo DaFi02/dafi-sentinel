@@ -175,15 +175,24 @@ def build_investigation_graph(
     the compiled graph with this TTL; stale paused threads are
     finalized with ``decision_reason='approval-timeout'`` so the
     audit trail captures abandoned investigations.
+
+    The ``clock`` parameter (R3 F2) is the seam replay-based review
+    relies on: every audit record produced by the inspection, retrieval,
+    approval, render, and finalize nodes is timestamped with
+    ``clock()`` instead of the wall clock. The default preserves the
+    pre-fix behavior (``datetime.now(UTC)``) so existing callers do
+    not need to change.
     """
 
+    effective_clock = clock or (lambda: datetime.now(UTC))
+
     builder = StateGraph(InvestigationState)
-    builder.add_node("inspect", _make_inspect_node(gate, audits))
-    builder.add_node("retrieve", _make_retrieve_node(workbench, audits))
+    builder.add_node("inspect", _make_inspect_node(gate, audits, effective_clock))
+    builder.add_node("retrieve", _make_retrieve_node(workbench, audits, effective_clock))
     builder.add_node("compose_answer", _make_compose_node())
-    builder.add_node("request_approval", _make_approval_node(audits))
-    builder.add_node("render_chart", _make_render_node(workbench, audits))
-    builder.add_node("finalize", _make_finalize_node(audits))
+    builder.add_node("request_approval", _make_approval_node(audits, effective_clock))
+    builder.add_node("render_chart", _make_render_node(workbench, audits, effective_clock))
+    builder.add_node("finalize", _make_finalize_node(audits, effective_clock))
 
     builder.add_edge(START, "inspect")
     builder.add_edge("inspect", "retrieve")
@@ -234,7 +243,11 @@ def _actor(state: InvestigationState) -> ActorRef:
     return ActorRef(id=actor_id, kind=cast(Any, kind))
 
 
-def _make_inspect_node(gate: SecurityGate, audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_inspect_node(
+    gate: SecurityGate,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def inspect(state: InvestigationState) -> dict[str, Any]:
         actor = _actor(state)
         decision = gate.inspect_user_request(actor, state["session_id"], state["question"])
@@ -245,6 +258,7 @@ def _make_inspect_node(gate: SecurityGate, audits: AuditRepository) -> Callable[
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -253,7 +267,11 @@ def _make_inspect_node(gate: SecurityGate, audits: AuditRepository) -> Callable[
     return inspect
 
 
-def _make_retrieve_node(workbench: WorkbenchService, audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_retrieve_node(
+    workbench: WorkbenchService,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def retrieve(state: InvestigationState) -> dict[str, Any]:
         answer, cited = workbench.answer_question(
             actor_id=state["actor_id"],
@@ -274,6 +292,7 @@ def _make_retrieve_node(workbench: WorkbenchService, audits: AuditRepository) ->
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -296,7 +315,10 @@ def _make_compose_node() -> Callable[[InvestigationState], dict[str, Any]]:
     return compose
 
 
-def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_approval_node(
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def request_approval(state: InvestigationState) -> dict[str, Any]:
         requestor_id = state.get("actor_id") or ""
         # Pause execution and surface the approval prompt to the caller.
@@ -321,6 +343,7 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
+                clock=clock,
             )
             audits.write_audit(state["session_id"], record)
             return {
@@ -345,6 +368,7 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
                 decision=authz,
                 session_id=state["session_id"],
                 role_context=approver_role_context,
+                clock=clock,
             )
             audits.write_audit(state["session_id"], record)
             return {
@@ -378,6 +402,7 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
             decision=decision,
             session_id=state["session_id"],
             role_context=approver_role_context,
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -391,7 +416,11 @@ def _make_approval_node(audits: AuditRepository) -> Callable[[InvestigationState
     return request_approval
 
 
-def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_render_node(
+    workbench: WorkbenchService,
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def render_chart(state: InvestigationState) -> dict[str, Any]:
         from dafi_sentinel.domain.models import ChartSpec
 
@@ -422,6 +451,7 @@ def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> C
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
+                clock=clock,
             )
             audits.write_audit(state["session_id"], record)
             return {
@@ -441,6 +471,7 @@ def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> C
                 decision=decision,
                 session_id=state["session_id"],
                 role_context=(state.get("owner_id") or "",),
+                clock=clock,
             )
             audits.write_audit(state["session_id"], record)
             return {
@@ -452,7 +483,10 @@ def _make_render_node(workbench: WorkbenchService, audits: AuditRepository) -> C
     return render_chart
 
 
-def _make_finalize_node(audits: AuditRepository) -> Callable[[InvestigationState], dict[str, Any]]:
+def _make_finalize_node(
+    audits: AuditRepository,
+    clock: Callable[[], datetime],
+) -> Callable[[InvestigationState], dict[str, Any]]:
     def finalize(state: InvestigationState) -> dict[str, Any]:
         actor = _actor(state)
         existing_reason = state.get("decision_reason")
@@ -478,6 +512,7 @@ def _make_finalize_node(audits: AuditRepository) -> Callable[[InvestigationState
             decision=decision,
             session_id=state["session_id"],
             role_context=(state.get("owner_id") or "",),
+            clock=clock,
         )
         audits.write_audit(state["session_id"], record)
 
@@ -551,13 +586,14 @@ def _build_audit_record(
     decision: PolicyDecision,
     session_id: str,
     role_context: tuple[str, ...],
+    clock: Callable[[], datetime],
 ) -> AuditRecord:
     return AuditRecord(
         id=new_audit_id(),
         actor=actor,
         action=action,
         decision=decision,
-        timestamp=datetime.now(UTC),
+        timestamp=clock(),
         role_context=role_context,
     )
 
