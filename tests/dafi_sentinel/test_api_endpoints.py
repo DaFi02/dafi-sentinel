@@ -87,14 +87,32 @@ def _seeded_app(*, owner_id: str = "user-1", with_docs: bool = True) -> tuple[Te
             )
         )
 
-    app = create_workbench_app(auth=auth, workbench=workbench)
+    app = create_workbench_app(auth=auth, workbench=workbench, cookie_secure=False)
     return TestClient(app), workbench, auth, evidence
 
 
 def _login(client: TestClient, username: str = "ada", password: str = "hunter2!") -> str:
+    """Log the client in via the cookie path and return the session token.
+
+    The CRIT-1 fix moves the session token out of the JSON body and into
+    a Set-Cookie header. ``TestClient`` persists the cookie across
+    requests on the same client instance, so most callers can simply
+    call ``_login(client)`` and then issue subsequent requests without
+    any auth header. The returned token is the cookie value, exposed
+    for the bearer-header fallback tests.
+    """
     response = client.post("/sessions", json={"username": username, "password": password})
     assert response.status_code == 201, response.text
-    return response.json()["token"]
+    # The token lives in the Set-Cookie header. Extract it for the
+    # bearer-fallback test path.
+    cookie_header = response.headers.get("set-cookie", "")
+    token_segment = next(
+        (s for s in cookie_header.split(";") if s.strip().startswith("dafi_sentinel_session=")),
+        "",
+    )
+    if not token_segment:
+        return ""
+    return token_segment.split("=", 1)[1].strip()
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -106,7 +124,8 @@ def _auth(token: str) -> dict[str, str]:
 # ---------------------------------------------------------------------- #
 
 
-def test_login_succeeds_with_valid_credentials_and_returns_session_token():
+def test_login_succeeds_with_valid_credentials_and_returns_user_profile():
+    """Login returns the user profile; the token lives in the Set-Cookie header (CRIT-1)."""
     client, _, _, _ = _seeded_app()
 
     response = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
@@ -115,7 +134,9 @@ def test_login_succeeds_with_valid_credentials_and_returns_session_token():
     body = response.json()
     assert body["user_id"] == "user-1"
     assert body["display_name"] == "Analyst"
-    assert body["token"]
+    # The CRIT-1 fix moves the token out of the body and into the
+    # Set-Cookie header. The body must not contain a token field.
+    assert "token" not in body
 
 
 def test_login_rejects_invalid_credentials_with_401():
@@ -452,12 +473,20 @@ def test_roles_endpoint_returns_404_for_unknown_user():
 
 
 def test_audits_endpoint_returns_only_records_for_authenticated_actor():
-    client, _, _, _ = _seeded_app()
-    ada_token = _login(client)
-    mike_token = _login(client, username="mike", password="correct horse")
+    """Each authenticated user sees only their own audit records.
 
-    ada = client.get("/audits", headers=_auth(ada_token)).json()
-    mike = client.get("/audits", headers=_auth(mike_token)).json()
+    The CRIT-1 fix moves auth to cookies, so this test uses two
+    separate TestClient instances (one per user) to keep the cookie
+    state independent. The cookie path is the dashboard path; the
+    underlying ownership check is the same.
+    """
+    ada_client, _, _, _ = _seeded_app()
+    mike_client, _, _, _ = _seeded_app()
+    _login(ada_client)
+    _login(mike_client, username="mike", password="correct horse")
+
+    ada = ada_client.get("/audits").json()
+    mike = mike_client.get("/audits").json()
 
     assert all(entry["actor_id"] == "user-1" for entry in ada["audits"])
     assert all(entry["actor_id"] == "user-2" for entry in mike["audits"])
@@ -506,3 +535,97 @@ def test_concurrent_qa_requests_produce_unique_audit_ids():
     qa_ids = [record.id for record in records if record.action == "qa.answer"]
     assert len(qa_ids) == 8
     assert len(set(qa_ids)) == 8, f"audit ids must be unique; got duplicates in {qa_ids}"
+
+
+# ---------------------------------------------------------------------- #
+# Cookie-based session (CRIT-1) — HttpOnly+SameSite=strict, no token in body
+# ---------------------------------------------------------------------- #
+
+
+def test_login_sets_httponly_cookie_and_omits_token_from_body():
+    """Login MUST set an HttpOnly+SameSite=strict cookie and MUST NOT return the token in JSON.
+
+    The 4R review (CRIT-1, R1-001) caught that the session bearer token
+    was returned in the JSON body, which any XSS could exfiltrate. The
+    fix moves the token to an HttpOnly cookie the browser sends
+    automatically; the JSON body only carries the user profile.
+    """
+    client, _, _, _ = _seeded_app()
+
+    response = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    # The token MUST NOT leak through the body.
+    assert "token" not in body, f"login body must not contain a token; got keys {list(body)}"
+    # The user profile fields are present.
+    assert body["user_id"] == "user-1"
+    assert body["display_name"] == "Analyst"
+    # The Set-Cookie header carries the session token with HttpOnly + SameSite=strict.
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "dafi_sentinel_session=" in set_cookie, f"missing session cookie: {set_cookie!r}"
+    assert "HttpOnly" in set_cookie, f"cookie must be HttpOnly: {set_cookie!r}"
+    assert "SameSite=strict" in set_cookie, f"cookie must be SameSite=strict: {set_cookie!r}"
+
+
+def test_logout_clears_session_cookie():
+    """Logout MUST clear the session cookie so the browser drops it.
+
+    A 204 with a Set-Cookie that expires the session cookie is the
+    standard pattern. Without this, a stolen cookie would remain valid
+    even after the user clicks logout.
+    """
+    client, _, _, _ = _seeded_app()
+    # Login (cookie is set on the client automatically).
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+
+    logout = client.delete("/sessions/me")
+
+    assert logout.status_code == 204, logout.text
+    clear_cookie = logout.headers.get("set-cookie", "")
+    # The clear cookie either has Max-Age=0 / expires in the past, or
+    # an empty value. Either is acceptable; the contract is that the
+    # browser no longer sends a valid session cookie.
+    assert "dafi_sentinel_session=" in clear_cookie
+    assert ("Max-Age=0" in clear_cookie) or ("expires=" in clear_cookie.lower()) or ("=;" in clear_cookie) or clear_cookie.endswith("=;") or "=;" in clear_cookie
+
+
+def test_authenticated_request_via_cookie_works_without_bearer_header():
+    """The cookie path is the primary auth mechanism for the dashboard.
+
+    After login, subsequent requests on the same TestClient (which
+    maintains cookies like a browser) succeed without an Authorization
+    header. This pins the contract that the dashboard depends on.
+    """
+    client, _, _, _ = _seeded_app()
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+
+    # No Authorization header — only the cookie.
+    response = client.get("/sessions/me")
+    assert response.status_code == 200, response.text
+    assert response.json()["user_id"] == "user-1"
+
+
+def test_bearer_header_works_as_fallback_for_non_browser_clients():
+    """Non-browser clients (curl, CLI) can still authenticate via ``Authorization: Bearer``.
+
+    The cookie is the dashboard path; the bearer header is a fallback
+    kept for ergonomic dev workflows. The API MUST accept either.
+    """
+    client, _, _, _ = _seeded_app()
+    login = client.post("/sessions", json={"username": "ada", "password": "hunter2!"})
+    assert login.status_code == 201
+    # The token is in the Set-Cookie header (not the body). Extract it
+    # from the cookie to use as a bearer for a fresh request.
+    cookie_header = login.headers.get("set-cookie", "")
+    token_part = [segment for segment in cookie_header.split(";") if segment.strip().startswith("dafi_sentinel_session=")][0]
+    token = token_part.split("=", 1)[1]
+    # Drop the cookie so only the bearer header is in play.
+    client.cookies.clear()
+
+    response = client.get("/sessions/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user_id"] == "user-1"

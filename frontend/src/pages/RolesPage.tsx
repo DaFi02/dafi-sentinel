@@ -1,19 +1,19 @@
 import { useState } from "react";
 
 import { useRoles } from "../api/queries";
-import { useMeProbe } from "../auth/useAuth";
+import { useSession } from "../auth/useAuth";
 import { ApiError } from "../api/client";
 
 export function RolesPage() {
-  const me = useMeProbe(true);
+  const { session } = useSession();
   const [userId, setUserId] = useState<string | null>(null);
-  // Probe sets the default userId once the session hydrates.
-  if (me.data && userId === null) {
-    setUserId(me.data.user_id);
+  // Session sets the default userId once it hydrates.
+  if (session && userId === null) {
+    setUserId(session.user_id);
   }
   const roles = useRoles(userId, true);
 
-  if (!me.data) {
+  if (!session) {
     return <p className="muted">loading…</p>;
   }
   if (roles.isLoading) {

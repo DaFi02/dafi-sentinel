@@ -1,8 +1,12 @@
-// Session bootstrap. The provider hydrates the API client from
-// localStorage, exposes the current session, and offers a logout helper
-// that wipes the token everywhere it is cached.
+// Session bootstrap. The provider hydrates the API client from the
+// HttpOnly session cookie (via a /sessions/me probe) and exposes the
+// current user profile plus a logout helper. The cookie is set by the
+// server on POST /sessions; the dashboard never reads or stores the
+// token itself, so an XSS payload cannot exfiltrate it.
+//
+// The CRIT-1 fix removed the localStorage path entirely.
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient, type SessionResponse } from "../api/client";
@@ -14,76 +18,48 @@ type SessionContextValue = {
   logout: () => Promise<void>;
 };
 
-const STORAGE_KEY = "dafi-sentinel:session";
-
 const SessionContext = createContext<SessionContextValue | undefined>(undefined);
 
-function readStoredSession(): SessionResponse | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  const raw = window.localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw) as SessionResponse;
-    if (!parsed || typeof parsed.token !== "string") {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function persistSession(session: SessionResponse | null): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  if (session) {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
-  } else {
-    window.localStorage.removeItem(STORAGE_KEY);
-  }
-}
-
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<SessionResponse | null>(null);
-  const [hydrated, setHydrated] = useState(false);
   const queryClient = useQueryClient();
 
-  useEffect(() => {
-    const stored = readStoredSession();
-    if (stored) {
-      apiClient.setToken(stored.token);
-    }
-    setSession(stored);
-    setHydrated(true);
-  }, []);
+  // The ``/sessions/me`` probe is the source of truth: if the cookie
+  // is present and valid, the server returns the user profile. If the
+  // cookie is absent or stale, the server returns 401 and the probe
+  // resolves to ``null``. The dashboard never stores the token.
+  const meQuery = useQuery<SessionResponse | null>({
+    queryKey: ["me"],
+    queryFn: async () => {
+      try {
+        return await apiClient.me();
+      } catch {
+        return null;
+      }
+    },
+    // Re-probe on focus so a fresh tab picks up a new login on another
+    // tab in the same browser.
+    refetchOnWindowFocus: true,
+  });
 
   const loginMutation = useMutation<SessionResponse, Error, { username: string; password: string }>({
     mutationFn: async (payload) => apiClient.login(payload.username, payload.password),
     onSuccess: (next) => {
-      apiClient.setToken(next.token);
-      persistSession(next);
-      setSession(next);
       queryClient.setQueryData(["me"], next);
     },
   });
 
-  const logoutMutation = useMutation<void, Error, string>({
-    mutationFn: async (token) => {
-      await apiClient.logout(token);
+  const logoutMutation = useMutation<void, Error, void>({
+    mutationFn: async () => {
+      await apiClient.logout();
     },
     onSettled: () => {
-      apiClient.setToken(null);
-      persistSession(null);
-      setSession(null);
       queryClient.setQueryData(["me"], null);
       queryClient.invalidateQueries();
     },
   });
+
+  const session = meQuery.data ?? null;
+  const hydrated = !meQuery.isLoading;
 
   const value = useMemo<SessionContextValue>(
     () => ({
@@ -91,17 +67,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       hydrated,
       login: async (username, password) => loginMutation.mutateAsync({ username, password }),
       logout: async () => {
-        if (session) {
-          await logoutMutation.mutateAsync(session.token);
-        } else {
-          apiClient.setToken(null);
-          persistSession(null);
-          setSession(null);
-          queryClient.invalidateQueries();
-        }
+        await logoutMutation.mutateAsync();
       },
     }),
-    [session, hydrated, loginMutation, logoutMutation, queryClient],
+    [session, hydrated, loginMutation, logoutMutation],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
@@ -113,18 +82,4 @@ export function useSession(): SessionContextValue {
     throw new Error("useSession must be used inside a SessionProvider");
   }
   return ctx;
-}
-
-export function useMeProbe(enabled: boolean) {
-  return useQuery<SessionResponse | null>({
-    queryKey: ["me"],
-    queryFn: async () => {
-      try {
-        return await apiClient.me();
-      } catch {
-        return null;
-      }
-    },
-    enabled,
-  });
 }

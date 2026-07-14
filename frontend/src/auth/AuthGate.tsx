@@ -4,16 +4,16 @@
 import type { ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
-import { useMeProbe } from "./useAuth";
+import { useSession } from "./useAuth";
 
 export function AuthGate({ children }: { children: ReactNode }) {
-  const probe = useMeProbe(true);
+  const { session, hydrated } = useSession();
   const location = useLocation();
 
-  if (probe.isLoading) {
+  if (!hydrated) {
     return <p className="muted">checking session…</p>;
   }
-  if (!probe.data) {
+  if (!session) {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
   return <>{children}</>;

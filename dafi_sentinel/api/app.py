@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from dafi_sentinel.api.auth import (
@@ -58,11 +58,19 @@ def create_workbench_app(
     *,
     auth: AuthService,
     workbench: WorkbenchService,
+    cookie_secure: bool = True,
+    cookie_name: str = "dafi_sentinel_session",
 ) -> FastAPI:
     """Build the FastAPI app with the supplied services.
 
     The factory is the seam tests use to inject fresh in-memory state
     per test case. ``uvicorn`` calls the same factory at runtime.
+
+    The CRIT-1 fix changed the session transport from a bearer token in
+    the JSON body to an HttpOnly+Secure+SameSite=strict cookie. The
+    cookie name and the ``Secure`` flag are configurable so tests can
+    exercise the contract under HTTP (the test client bypasses the
+    ``Secure`` check anyway, but the flag still affects the header).
     """
 
     app = FastAPI(
@@ -76,9 +84,24 @@ def create_workbench_app(
     )
     app.state.auth = auth
     app.state.workbench = workbench
+    app.state.cookie_name = cookie_name
+    app.state.cookie_secure = cookie_secure
+
+    def _resolve_token(request: Request) -> str:
+        """Resolve a session token from the cookie first, then the bearer header.
+
+        The cookie is the primary transport (dashboard path). The
+        bearer header is a fallback kept for non-browser clients
+        (curl, CLI). The dispatcher's CRIT-1 fix pins this two-path
+        contract.
+        """
+        cookie_token = request.cookies.get(cookie_name)
+        if cookie_token:
+            return cookie_token
+        return _extract_bearer(request)
 
     def _session_from_header(request: Request) -> tuple[Session, StoredUser]:
-        token = _extract_bearer(request)
+        token = _resolve_token(request)
         resolved = auth.resolve_session(token)
         if resolved is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or expired session")
@@ -98,7 +121,9 @@ def create_workbench_app(
     # ------------------------------------------------------------------ #
 
     @app.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
-    def login(payload: LoginRequest, request: Request) -> SessionResponse:
+    def login(
+        payload: LoginRequest, request: Request, response: Response
+    ) -> SessionResponse:
         try:
             session = auth.login(payload.username, payload.password)
         except InvalidCredentialsError as exc:
@@ -106,21 +131,67 @@ def create_workbench_app(
         stored = auth.users.find_by_id(session.user_id)
         assert stored is not None  # login guarantees a stored user
         workbench.record_login(actor_id=stored.user.id, session_id=session.token[:8])
+        # CRIT-1: the session token lives in an HttpOnly+Secure+SameSite=strict
+        # cookie. The JSON body MUST NOT carry the token so an XSS payload
+        # cannot exfiltrate it. The cookie is the only transport the
+        # browser will accept for subsequent dashboard requests.
+        response.set_cookie(
+            key=cookie_name,
+            value=session.token,
+            httponly=True,
+            secure=cookie_secure,
+            samesite="strict",
+            path="/",
+        )
         return SessionResponse(
-            token=session.token,
             user_id=stored.user.id,
             display_name=stored.user.display_name,
             roles=tuple(role.name for role in stored.user.roles),
         )
 
-    @app.delete("/sessions/{token}", status_code=status.HTTP_204_NO_CONTENT)
-    def logout(token: str, request: Request) -> None:
+    @app.delete("/sessions/me", status_code=status.HTTP_204_NO_CONTENT)
+    def logout_via_cookie(request: Request) -> Response:
+        """Logout the current session identified by the cookie.
+
+        The dashboard calls this endpoint; the cookie carries the
+        session token so the user can sign out without exposing the
+        token in a URL path. The cookie is cleared in the response so
+        the browser drops it.
+        """
+        token = _resolve_token(request)
         resolved = auth.resolve_session(token)
         if resolved is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
         session, stored = resolved
-        # The bearer header and the path token must agree, otherwise a
-        # logged-in user could log out a different user's session.
+        auth.logout(token)
+        workbench.record_logout(actor_id=stored.user.id, session_id=session.token[:8])
+        # Build a 204 response that clears the session cookie. The
+        # Secure flag must match the original ``Set-Cookie`` for the
+        # browser to recognise this as the same cookie.
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        response.delete_cookie(
+            key=cookie_name,
+            path="/",
+            secure=cookie_secure,
+            httponly=True,
+            samesite="strict",
+        )
+        return response
+
+    @app.delete("/sessions/{token}", status_code=status.HTTP_204_NO_CONTENT)
+    def logout(token: str, request: Request) -> None:
+        """Logout via the bearer path (non-browser clients).
+
+        The dashboard uses ``DELETE /sessions/me`` (cookie path). curl
+        and CLI scripts can keep using this path with an
+        ``Authorization: Bearer <token>`` header. The bearer and the
+        path token MUST agree to prevent a user from revoking another
+        user's session.
+        """
+        resolved = auth.resolve_session(token)
+        if resolved is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="session not found")
+        session, stored = resolved
         bearer = _extract_bearer(request)
         if bearer != token:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="cannot revoke another user's session")
@@ -132,7 +203,6 @@ def create_workbench_app(
     def me(request: Request) -> SessionResponse:
         session, stored = _session_from_header(request)
         return SessionResponse(
-            token=session.token,
             user_id=stored.user.id,
             display_name=stored.user.display_name,
             roles=tuple(role.name for role in stored.user.roles),

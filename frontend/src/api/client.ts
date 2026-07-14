@@ -1,10 +1,14 @@
-// Thin fetch wrapper that injects the bearer token and surfaces a
-// typed error envelope. The workbench server replies with
+// Thin fetch wrapper that sends the HttpOnly session cookie and surfaces
+// a typed error envelope. The workbench server replies with
 // ``{"detail": "..."}`` for non-2xx responses; the helper propagates
 // that to the TanStack Query layer.
+//
+// The CRIT-1 fix removed the bearer token from the JSON body and from
+// this client: the session is now an HttpOnly+SameSite=strict cookie
+// the browser sends automatically when ``credentials: 'include'`` is
+// set. The dashboard never reads or stores the token.
 
 export type SessionResponse = {
-  token: string;
   user_id: string;
   display_name: string;
   roles: string[];
@@ -80,28 +84,16 @@ export class ApiError extends Error {
 const BASE_URL = "/";
 
 export class ApiClient {
-  private token: string | null = null;
-
-  setToken(token: string | null): void {
-    this.token = token;
-  }
-
-  getToken(): string | null {
-    return this.token;
-  }
-
-  private headers(extra?: Record<string, string>): Record<string, string> {
-    const headers: Record<string, string> = { ...(extra ?? {}) };
-    if (this.token) {
-      headers["Authorization"] = `Bearer ${this.token}`;
-    }
-    return headers;
-  }
-
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    // ``credentials: 'include'`` is the cookie transport. The browser
+    // attaches the HttpOnly ``dafi_sentinel_session`` cookie to every
+    // same-origin request; the server reads it from ``request.cookies``.
     const response = await fetch(`${BASE_URL}${path}`, {
       ...init,
-      headers: this.headers(init.headers as Record<string, string> | undefined),
+      credentials: "include",
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+      },
     });
     if (!response.ok) {
       let detail = response.statusText;
@@ -129,8 +121,11 @@ export class ApiClient {
     });
   }
 
-  logout(token: string): Promise<void> {
-    return this.request<void>(`/sessions/${token}`, { method: "DELETE" });
+  logout(): Promise<void> {
+    // The cookie carries the session token; ``DELETE /sessions/me``
+    // resolves it from the cookie and clears the cookie in the
+    // response. The dashboard never needs to know the token value.
+    return this.request<void>("/sessions/me", { method: "DELETE" });
   }
 
   me(): Promise<SessionResponse> {

@@ -19,7 +19,14 @@ class LoginRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    token: str
+    """User profile returned by /sessions and /sessions/me.
+
+    The CRIT-1 fix removes the bearer token from the response body. The
+    token lives in an HttpOnly cookie set on the login response; the
+    body only carries the user profile fields the dashboard needs to
+    render the authenticated shell.
+    """
+
     user_id: str
     display_name: str
     roles: tuple[str, ...] = ()

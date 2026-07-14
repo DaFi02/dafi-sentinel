@@ -79,15 +79,30 @@ The API surface is:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST`   | `/sessions`             | none | login; issues a session token |
-| `DELETE` | `/sessions/{token}`     | bearer + path match | logout |
-| `GET`    | `/sessions/me`          | bearer | current user + roles |
-| `GET`    | `/evidence`             | bearer | owned evidence list |
-| `GET`    | `/evidence/{id}`        | bearer | owned evidence detail (404 / 403) |
-| `POST`   | `/qa`                   | bearer | RAG Q&A with cited evidence IDs |
-| `POST`   | `/charts`               | bearer | render a chart, returns PNG base64 |
-| `GET`    | `/roles/{user_id}`      | bearer + ownership | role + permission lookup |
-| `GET`    | `/audits`               | bearer | actor-scoped audit list |
+| `POST`   | `/sessions`             | none | login; sets an HttpOnly session cookie |
+| `DELETE` | `/sessions/me`          | cookie | logout; clears the session cookie |
+| `DELETE` | `/sessions/{token}`     | bearer + path match | logout (bearer fallback for non-browser clients) |
+| `GET`    | `/sessions/me`          | cookie or bearer | current user + roles |
+| `GET`    | `/evidence`             | cookie or bearer | owned evidence list |
+| `GET`    | `/evidence/{id}`        | cookie or bearer | owned evidence detail (404 / 403) |
+| `POST`   | `/qa`                   | cookie or bearer | RAG Q&A with cited evidence IDs |
+| `POST`   | `/charts`               | cookie or bearer | render a chart, returns PNG base64 |
+| `GET`    | `/roles/{user_id}`      | cookie or bearer + ownership | role + permission lookup |
+| `GET`    | `/audits`               | cookie or bearer | actor-scoped audit list |
+
+#### Session transport (CRIT-1 fix)
+
+The session is delivered to the browser as an HttpOnly+Secure+SameSite=strict
+cookie named ``dafi_sentinel_session``. The login response body
+contains only the user profile (no token) so an XSS payload cannot
+exfiltrate the long-lived token. The dashboard sends
+``credentials: 'include'`` on every request so the browser attaches
+the cookie automatically. Non-browser clients (curl, CLI) can still
+authenticate via the ``Authorization: Bearer <token>`` header — the
+login response sets the same token in the ``Set-Cookie`` header, so a
+client can copy it from there and use it as a bearer. The bearer
+header is a fallback kept for ergonomic dev workflows; the cookie is
+the primary transport.
 
 Every stateful action writes an ``AuditRecord`` through the
 ``AuditRepository`` contract. The seeded users are:

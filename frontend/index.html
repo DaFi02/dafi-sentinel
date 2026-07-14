@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The CRIT-1 fix pins a strict Content-Security-Policy. The
+      dashboard ships its own bundled JS (Vite output under /assets)
+      and has no need for inline scripts, eval, or remote origins;
+      the policy refuses them so an XSS payload cannot exfiltrate the
+      session cookie or pivot to a remote command-and-control host.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    />
     <title>DAFI Sentinel Workbench</title>
   </head>
   <body>

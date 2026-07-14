@@ -4,14 +4,18 @@
 // workbench server. The auth gate is implicitly exercised by going
 // through the login form in the auth tests, so these focus on page-level
 // happy paths and 403/404 handling.
+//
+// The CRIT-1 fix moved the session transport to an HttpOnly cookie.
+// ``seedSessionViaCookie`` stubs the ``/sessions/me`` probe the
+// ``SessionProvider`` uses to hydrate the user profile; the dashboard
+// never reads or stores the token.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { SessionProvider } from "../auth/useAuth";
-import { apiClient } from "../api/client";
 import { EvidenceListPage } from "../pages/EvidenceListPage";
 import { EvidenceDetailPage } from "../pages/EvidenceDetailPage";
 import { QAPage } from "../pages/QAPage";
@@ -21,6 +25,11 @@ function makeFetch(responseMap: Record<string, () => Response | Promise<Response
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     const method = (init?.method ?? "GET").toUpperCase();
+    // The CRIT-1 fix requires every request to opt into the cookie
+    // transport. Pin the contract here so a future refactor that drops
+    // ``credentials: 'include'`` fails the test instead of silently
+    // breaking the dashboard.
+    expect(init?.credentials).toBe("include");
     const path = url.replace(/^https?:\/\/[^/]+/, "").replace(/^\/+/, "/");
     const key = `${method} ${path.split("?")[0]}`;
     const responder = responseMap[key];
@@ -55,28 +64,32 @@ function renderAt(node: React.ReactNode, initialRoute: string, queryClient = mak
   );
 }
 
-function seedSession(): void {
-  window.localStorage.setItem(
-    "dafi-sentinel:session",
-    JSON.stringify({ token: "tok-1", user_id: "user-1", display_name: "Ada", roles: ["analyst"] }),
-  );
-  apiClient.setToken("tok-1");
+/**
+ * Stub a successful ``/sessions/me`` probe so the SessionProvider
+ * hydrates the user profile. The cookie path is the dashboard path;
+ * the test fetch stub does not need to inspect Set-Cookie because the
+ * cookie is sent back on the same fetch instance in the real browser.
+ */
+function seedSessionResponse(): () => Response {
+  return () =>
+    new Response(
+      JSON.stringify({
+        user_id: "user-1",
+        display_name: "Ada",
+        roles: ["analyst"],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
 }
 
 describe("evidence list", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    apiClient.setToken(null);
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
   });
 
   it("renders the owned evidence", async () => {
-    seedSession();
     const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
       "GET /evidence": () =>
         new Response(
           JSON.stringify([
@@ -103,8 +116,8 @@ describe("evidence list", () => {
   });
 
   it("shows the empty state when the actor owns no evidence", async () => {
-    seedSession();
     const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
       "GET /evidence": () => new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } }),
     });
     vi.stubGlobal("fetch", fetchStub);
@@ -118,19 +131,13 @@ describe("evidence list", () => {
 });
 
 describe("evidence detail", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    apiClient.setToken(null);
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
   });
 
   it("renders the evidence details", async () => {
-    seedSession();
     const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
       "GET /evidence/ev-1": () =>
         new Response(
           JSON.stringify({
@@ -156,8 +163,8 @@ describe("evidence detail", () => {
   });
 
   it("shows a 403 message when the evidence belongs to another account", async () => {
-    seedSession();
     const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
       "GET /evidence/ev-private": () =>
         new Response(JSON.stringify({ detail: "forbidden" }), { status: 403 }),
     });
@@ -172,19 +179,13 @@ describe("evidence detail", () => {
 });
 
 describe("qa page", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    apiClient.setToken(null);
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
   });
 
   it("submits a question and shows the cited evidence", async () => {
-    seedSession();
     const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
       "POST /qa": () =>
         new Response(
           JSON.stringify({
@@ -213,20 +214,14 @@ describe("qa page", () => {
 });
 
 describe("charts page", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    apiClient.setToken(null);
-  });
-
   afterEach(() => {
     vi.restoreAllMocks();
-    window.localStorage.clear();
   });
 
   it("renders a chart and surfaces the cited evidence count", async () => {
-    seedSession();
     const pngBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
       "POST /charts": () =>
         new Response(
           JSON.stringify({

@@ -32,7 +32,9 @@ export function useLogin() {
   return useMutation<SessionResponse, Error, { username: string; password: string }>({
     mutationFn: async (payload) => apiClient.login(payload.username, payload.password),
     onSuccess: (session) => {
-      apiClient.setToken(session.token);
+      // The CRIT-1 fix: the session token lives in the HttpOnly cookie
+      // the server set on the login response. The client only needs to
+      // refresh the me query so the rest of the dashboard hydrates.
       queryClient.setQueryData(["me"], session);
     },
   });
@@ -40,12 +42,13 @@ export function useLogin() {
 
 export function useLogout() {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, string>({
-    mutationFn: async (token) => {
-      await apiClient.logout(token);
+  return useMutation<void, Error, void>({
+    mutationFn: async () => {
+      // The cookie carries the session token; the server clears it on
+      // DELETE /sessions/me. The client never needs the token value.
+      await apiClient.logout();
     },
     onSuccess: () => {
-      apiClient.setToken(null);
       queryClient.setQueryData(["me"], null);
       queryClient.invalidateQueries();
     },
