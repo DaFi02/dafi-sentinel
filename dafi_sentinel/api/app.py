@@ -175,11 +175,11 @@ def create_workbench_app(
         )
         cited_response = tuple(
             CitedEvidence(
-                evidence_id=ref.evidence_id,
-                source_uri=ref.source.uri,
-                score=0.0,
+                evidence_id=item.ref.evidence_id,
+                source_uri=item.ref.source.uri,
+                score=item.score,
             )
-            for ref in cited
+            for item in cited
         )
         return QAResponse(answer=answer, cited_evidence=cited_response, session_id=payload.session_id)
 

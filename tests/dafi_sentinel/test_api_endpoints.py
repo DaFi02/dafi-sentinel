@@ -308,6 +308,36 @@ def test_qa_requires_authenticated_session():
     assert response.status_code == 401
 
 
+def test_qa_propagates_ranker_score_to_response_cited_evidence():
+    """The /qa response must surface the ML ranker's similarity score.
+
+    The 4R review (CRIT-4, R3-002=R4-008) caught that the QA endpoint
+    hardcoded ``score=0.0`` while the workbench discarded the
+    ``SimilarityMatch.score`` from ``ml.analysis.rank_similarity``. The
+    ml-incident-analysis spec scenario 'Rank similar evidence' requires
+    score values for reviewer inspection, so the fix propagates the
+    ranker score through the response.
+    """
+    client, _, _, _ = _seeded_app()
+    token = _login(client)
+
+    response = client.post(
+        "/qa",
+        json={"question": "payment latency", "session_id": "session-1", "limit": 3},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    cited = body["cited_evidence"]
+    assert cited, "Q&A should cite at least one evidence id"
+    # The first cited evidence must carry a non-zero ranker score so
+    # reviewers can compare relevance across sessions.
+    assert any(item["score"] > 0.0 for item in cited), (
+        f"at least one cited evidence must have a non-zero score; got {cited}"
+    )
+
+
 # ---------------------------------------------------------------------- #
 # Charts
 # ---------------------------------------------------------------------- #

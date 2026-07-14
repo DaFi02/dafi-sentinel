@@ -117,6 +117,20 @@ class EvidenceRepositoryAdapter:
         return self._store.get(evidence_id)
 
 
+@dataclass(frozen=True)
+class CitedEvidenceWithScore:
+    """Cited evidence paired with the ML ranker score that selected it.
+
+    The score is the cosine similarity produced by
+    :func:`dafi_sentinel.ml.analysis.rank_similarity`. Surfacing it on the
+    response (instead of the prior hardcoded ``0.0``) is required by the
+    ``ml-incident-analysis`` spec scenario 'Rank similar evidence'.
+    """
+
+    ref: EvidenceRef
+    score: float
+
+
 @dataclass
 class WorkbenchService:
     """Glue between the FastAPI app and the deterministic services.
@@ -165,26 +179,31 @@ class WorkbenchService:
         session_id: str,
         question: str,
         limit: int,
-    ) -> tuple[str, tuple[EvidenceRef, ...]]:
+    ) -> tuple[str, tuple[CitedEvidenceWithScore, ...]]:
         """Compose the retrieval port with the PR4 ML ranker.
 
         The retrieval port returns the candidate evidence set; the
-        ranker orders them deterministically. If no evidence supports the
-        question, the answer is "unknown" and the audit log records the
-        unanswered question.
+        ranker orders them deterministically and produces a cosine
+        similarity score per match. If no evidence supports the question,
+        the answer is "unknown" and the audit log records the unanswered
+        question.
         """
         candidates = self._index().search(question, limit=limit)
+        cited: tuple[CitedEvidenceWithScore, ...]
         if not candidates:
             answer = "unknown"
-            cited: tuple[EvidenceRef, ...] = ()
+            cited = ()
         else:
             # Build the records set the ranker can score against.
             records = self._records_for(candidates)
             ranked = rank_similarity(question, records, seed=0)
             cited = tuple(
-                EvidenceRef(
-                    evidence_id=match.evidence_id,
-                    source=self.evidence.get(match.evidence_id).source,  # type: ignore[union-attr]
+                CitedEvidenceWithScore(
+                    ref=EvidenceRef(
+                        evidence_id=match.evidence_id,
+                        source=self.evidence.get(match.evidence_id).source,  # type: ignore[union-attr]
+                    ),
+                    score=match.score,
                 )
                 for match in ranked
             )
@@ -209,10 +228,12 @@ class WorkbenchService:
         return tuple(records)
 
     @staticmethod
-    def _compose_answer(question: str, cited: Sequence[EvidenceRef]) -> str:
+    def _compose_answer(
+        question: str, cited: Sequence[CitedEvidenceWithScore]
+    ) -> str:
         if not cited:
             return "unknown"
-        evidence_list = ", ".join(ref.evidence_id for ref in cited)
+        evidence_list = ", ".join(item.ref.evidence_id for item in cited)
         return f"based on {evidence_list}: {question.strip()}"
 
     # ------------------------------------------------------------------ #

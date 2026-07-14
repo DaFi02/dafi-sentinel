@@ -236,7 +236,7 @@ def _make_retrieve_node(workbench: WorkbenchService, audits: AuditRepository) ->
 
         return {
             "answer": answer,
-            "cited": [ref.evidence_id for ref in cited],
+            "cited": [item.ref.evidence_id for item in cited],
             "audit_records": [_serialize_audit(record)],
         }
 
