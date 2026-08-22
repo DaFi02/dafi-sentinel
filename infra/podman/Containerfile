@@ -1,0 +1,71 @@
+# Multi-stage Containerfile for DAFI Sentinel (rootless Podman).
+#
+# Stage graph (design D1):
+#   base -> deps-prod -> runtime   (production-only venv, LAST target)
+#   base -> deps-full  -> test     (dev group included)
+#
+# Dependency syncs are lock-exact (`uv sync --locked`); any pyproject.toml
+# edit absent from uv.lock fails the build instead of re-resolving (design D2).
+# NOTE: `--locked` is used instead of the design's literal `--frozen` because
+# uv's `--frozen` takes the lockfile at face value and does NOT fail on
+# manifest/lock drift, while `--locked` asserts freshness and never mutates
+# the lock — which is what spec R2 requires (verified empirically, uv 0.11).
+# The runtime target is declared last so a bare `podman build` yields the
+# deployable image; the suite image is built with `--target test`.
+
+ARG PYTHON_TAG=3.13-slim-bookworm
+
+FROM docker.io/library/python:${PYTHON_TAG} AS base
+
+# ca-certificates is the only apt requirement: psycopg[binary],
+# scikit-learn, numpy, and matplotlib all ship manylinux wheels.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1
+
+WORKDIR /app
+
+# Dedicated unprivileged identity for both leaf images (design D3).
+RUN groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/appuser appuser
+
+# uv binary pinned by digest captured from the uv:0.11 tag at apply time.
+COPY --from=ghcr.io/astral-sh/uv@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 /uv /usr/local/bin/uv
+
+FROM base AS deps-prod
+
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
+
+FROM base AS deps-full
+
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project
+
+FROM deps-full AS test
+
+# Manifests first (cacheable), then source; fixtures ride along under tests/.
+COPY pyproject.toml uv.lock ./
+COPY dafi_sentinel ./dafi_sentinel
+COPY tests ./tests
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv sync --locked
+
+ENV PATH="/app/.venv/bin:$PATH"
+USER 10001
+CMD ["pytest", "-q"]
+
+FROM deps-prod AS runtime
+
+COPY dafi_sentinel ./dafi_sentinel
+RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
+USER 10001
+CMD ["uvicorn", "dafi_sentinel.api.app:default_workbench_app", "--host", "0.0.0.0", "--port", "8000"]
