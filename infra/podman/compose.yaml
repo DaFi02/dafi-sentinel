@@ -11,6 +11,10 @@ version: "3.8"
 # Tear down:
 #   podman compose -f infra/podman/compose.yaml down -v
 #
+# Serve the API against this database (profile-gated, design D4):
+#   podman-compose -f infra/podman/compose.yaml --profile api up -d
+#   curl http://127.0.0.1:8000/docs
+#
 # This stack intentionally exposes PostgreSQL on 127.0.0.1:55432 (not 5432)
 # so it cannot collide with a system Postgres instance, and the volume is
 # named for easy teardown.
@@ -32,6 +36,28 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Opt-in API service (design D4): hidden behind the "api" profile so a
+  # plain `up -d` still starts postgres only. Readiness is enforced by the
+  # baked-in wait_for_postgres.py helper (execs uvicorn once PostgreSQL
+  # answers), not by compose healthcheck support. Publishes on loopback
+  # only; mounts nothing (source and deps are baked into the image).
+  api:
+    profiles: ["api"]
+    build:
+      context: ../..
+      dockerfile: infra/podman/Containerfile
+      target: runtime
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DAFI_PGVECTOR_DSN: "postgresql://sentinel:sentinel@postgres:5432/sentinel"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["python", "/opt/dafi/wait_for_postgres.py"]
+    command: ["uvicorn", "dafi_sentinel.api.app:default_workbench_app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
 
 volumes:
   dafi-sentinel-pgdata:

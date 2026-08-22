@@ -35,6 +35,10 @@ RUN groupadd --gid 10001 appuser \
 # uv binary pinned by digest captured from the uv:0.11 tag at apply time.
 COPY --from=ghcr.io/astral-sh/uv@sha256:77280f2f771df71f90786c314fe1bbc1e023feac652969bbf139c280babf2eb7 /uv /usr/local/bin/uv
 
+# DB readiness helper baked into every leaf (designs D4/D5): probes
+# PostgreSQL via DAFI_PGVECTOR_DSN, then execs the real command.
+COPY infra/podman/scripts/wait_for_postgres.py /opt/dafi/wait_for_postgres.py
+
 FROM base AS deps-prod
 
 COPY pyproject.toml uv.lock ./
