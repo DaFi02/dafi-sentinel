@@ -1,1 +1,13 @@
-infra/podman/.containerignore
+# Build context denylist — keeps host artifacts out of every image layer.
+# Host .venv must NEVER enter an image (spec R3); source and deps are baked
+# lock-exact by uv sync --frozen inside the Containerfile stages instead.
+.git/
+**/.venv/
+.local/
+**/__pycache__/
+.pytest_cache/
+node_modules/
+frontend/
+scripts/
+openspec/
+PORTFOLIO.md
