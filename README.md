@@ -4,15 +4,18 @@ DAFI Sentinel is a security-first incident investigation workbench.
 
 ## Quick start
 
-All backend workflows run in rootless Podman containers. Build the test
-image and run the suite lock-exact inside it:
+All backend workflows run in rootless Podman containers. Build both
+images and run the suite lock-exact inside the test image:
 
 ```bash
+podman build -f infra/podman/Containerfile --target runtime -t dafi-sentinel-api:local .
 podman build -f infra/podman/Containerfile --target test -t dafi-sentinel-test:local .
 podman run --rm dafi-sentinel-test:local
 ```
 
-The default pytest run inside the container needs no live database,
+Dependencies sync with `uv sync --locked` inside the image — the build
+fails on manifest/lock drift, so images always match `uv.lock`. The
+default pytest run inside the container needs no live database,
 external service, or host Python setup. Container guard tests
 (`tests/dafi_sentinel/test_container_workflow.py`) skip cleanly on hosts
 without `podman`, so CI stays green either way.
@@ -22,10 +25,10 @@ without `podman`, so CI stays green either way.
 | Concern | Rule |
 |---|---|
 | Ports | Loopback publish only, >1024 (`127.0.0.1:8000`, `127.0.0.1:55432`) |
-| Host `.venv` | NEVER mounted or baked — images sync lock-exact via `uv sync --frozen` |
+| Host `.venv` | NEVER mounted or baked — images sync lock-exact via `uv sync --locked` |
 | Optional fast loop | Read-only bind mount labeled `:Z` (SELinux) + named volume at `/app/.venv` |
 | Env contract | `DAFI_PGVECTOR_SMOKE` · `DAFI_PGVECTOR_DSN` · `WAIT_TIMEOUT` (default 60 s) |
-| Rebuild gotcha | Compose reuses its own `<project>_api` image across ups — `podman rmi` it after manual target rebuilds |
+| Rebuild gotcha | Compose reuses its own `<project>_api` image across ups — find it with `podman images \| grep api` and `podman rmi` it after manual target rebuilds |
 
 ## Run the pgvector smoke (PR3)
 
@@ -134,9 +137,9 @@ podman run --rm dafi-sentinel-api:local \
 > user store and ``cookie_secure=True``:
 
 The env vars below configure the dev factory. Container runs pass them to
-the compose `api` service (e.g. `-e DAFI_DEV_PASSWORD=...` on the service
-environment); the host-based commands are shown only to illustrate
-factory semantics:
+the compose `api` service via its `environment:` block (see the
+commented `DAFI_DEV_PASSWORD` example in `infra/podman/compose.yaml`);
+the host-based commands are shown only to illustrate factory semantics:
 
 ```bash
 # 1. Generate a stable dev-only password (skip in CI):
