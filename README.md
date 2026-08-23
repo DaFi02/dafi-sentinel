@@ -4,26 +4,69 @@ DAFI Sentinel is a security-first incident investigation workbench.
 
 ## Quick start
 
+All backend workflows run in rootless Podman containers. Build the test
+image and run the suite lock-exact inside it:
+
 ```bash
-uv sync
-uv run pytest
+podman build -f infra/podman/Containerfile --target test -t dafi-sentinel-test:local .
+podman run --rm dafi-sentinel-test:local
 ```
 
-The default pytest run needs no live database, Podman, or external service.
+The default pytest run inside the container needs no live database,
+external service, or host Python setup. Container guard tests
+(`tests/dafi_sentinel/test_container_workflow.py`) skip cleanly on hosts
+without `podman`, so CI stays green either way.
+
+### Container workflow reference
+
+| Concern | Rule |
+|---|---|
+| Ports | Loopback publish only, >1024 (`127.0.0.1:8000`, `127.0.0.1:55432`) |
+| Host `.venv` | NEVER mounted or baked — images sync lock-exact via `uv sync --frozen` |
+| Optional fast loop | Read-only bind mount labeled `:Z` (SELinux) + named volume at `/app/.venv` |
+| Env contract | `DAFI_PGVECTOR_SMOKE` · `DAFI_PGVECTOR_DSN` · `WAIT_TIMEOUT` (default 60 s) |
+| Rebuild gotcha | Compose reuses its own `<project>_api` image across ups — `podman rmi` it after manual target rebuilds |
 
 ## Run the pgvector smoke (PR3)
 
 The pgvector retrieval adapter has an opt-in smoke test that requires a
-local PostgreSQL + pgvector instance. Start it with Podman Compose and run
-the smoke:
+PostgreSQL + pgvector instance. The canonical flow runs everything
+in-network with containers only:
 
 ```bash
-podman compose -f infra/podman/compose.yaml up -d
-DAFI_PGVECTOR_SMOKE=1 \
-DAFI_PGVECTOR_DSN=postgresql://sentinel:sentinel@127.0.0.1:55432/sentinel \
-  uv run pytest tests/dafi_sentinel/test_pgvector_adapter.py -v
-podman compose -f infra/podman/compose.yaml down -v
+# 1. Build the test image once (lock-exact deps, dev group included)
+podman build -f infra/podman/Containerfile --target test -t dafi-sentinel-test:local .
+
+# 2. Start an isolated pgvector on a scratch network
+podman network create dafi-sentinel-test-net
+podman run -d --name sentinel-pg-smoke --network dafi-sentinel-test-net \
+  -e POSTGRES_USER=sentinel -e POSTGRES_PASSWORD=sentinel -e POSTGRES_DB=sentinel \
+  docker.io/pgvector/pgvector:pg16
+
+# 3. Wait for readiness, then run the smoke against the in-network DSN
+#    (env-only switch — no code change)
+podman run --rm --network dafi-sentinel-test-net \
+  --entrypoint '["python","/opt/dafi/wait_for_postgres.py","pytest","tests/dafi_sentinel/test_pgvector_adapter.py","-v"]' \
+  -e DAFI_PGVECTOR_SMOKE=1 \
+  -e DAFI_PGVECTOR_DSN=postgresql://sentinel:sentinel@sentinel-pg-smoke:5432/sentinel \
+  dafi-sentinel-test:local
+
+# 4. Teardown
+podman rm -f sentinel-pg-smoke && podman network rm dafi-sentinel-test-net
 ```
+
+Prefer Compose orchestration? The same stack serves both:
+
+```bash
+podman-compose -f infra/podman/compose.yaml up -d                   # postgres only → 127.0.0.1:55432
+podman-compose -f infra/podman/compose.yaml --profile api up -d     # + API → http://127.0.0.1:8000
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/docs # expect 200
+podman-compose -f infra/podman/compose.yaml --profile api down      # add -v to drop volumes
+```
+
+Host-side legacy flow (uses the published port): set
+`DAFI_PGVECTOR_DSN=postgresql://sentinel:sentinel@127.0.0.1:55432/sentinel`
+with `DAFI_PGVECTOR_SMOKE=1`.
 
 The smoke test indexes a runbook and a decoy document, queries the
 ``RetrievalIndex`` contract against a live vector database, and asserts
@@ -53,9 +96,10 @@ work without any external infrastructure:
 Run the slice tests:
 
 ```bash
-uv run pytest tests/dafi_sentinel/test_ml_analysis.py \
-               tests/dafi_sentinel/test_chart_validation.py \
-               tests/dafi_sentinel/test_chart_renderer.py -v
+podman run --rm dafi-sentinel-test:local pytest \
+  tests/dafi_sentinel/test_ml_analysis.py \
+  tests/dafi_sentinel/test_chart_validation.py \
+  tests/dafi_sentinel/test_chart_renderer.py -v
 ```
 
 ## Workbench API and dashboard (PR5)
@@ -67,12 +111,15 @@ the dashboard lives in ``frontend/``.
 ### Run the API
 
 ```bash
-# 1. Start the FastAPI server (default in-memory services, seeded
-#    with one analyst and one maintainer).
-uv run uvicorn dafi_sentinel.api.app:default_workbench_app --reload
+# 1. Postgres only by default; add the API with the profile (loopback :8000)
+podman-compose -f infra/podman/compose.yaml --profile api up -d
 
-# 2. Or build a custom app from your own services:
-uv run python -c "from dafi_sentinel.api.app import create_workbench_app; print(create_workbench_app.__doc__)"
+# 2. Verify it is up
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/docs   # expect 200
+
+# 3. Inspect the app factory without starting a server:
+podman run --rm dafi-sentinel-api:local \
+  python -c "from dafi_sentinel.api.app import create_workbench_app; print(create_workbench_app.__doc__)"
 ```
 
 > R4 crit#1: ``default_workbench_app`` is a **dev-only** factory. It
@@ -86,12 +133,18 @@ uv run python -c "from dafi_sentinel.api.app import create_workbench_app; print(
 > :func:`dafi_sentinel.api.app.create_workbench_app` with a real
 > user store and ``cookie_secure=True``:
 
+The env vars below configure the dev factory. Container runs pass them to
+the compose `api` service (e.g. `-e DAFI_DEV_PASSWORD=...` on the service
+environment); the host-based commands are shown only to illustrate
+factory semantics:
+
 ```bash
 # 1. Generate a stable dev-only password (skip in CI):
 export DAFI_DEV_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(16))')"
 
-# 2. Run the dev server:
-uv run uvicorn dafi_sentinel.api.app:default_workbench_app --reload
+# 2. Run the dev server (containerized — see compose flow above; the
+#    wait_for_postgres handoff execs uvicorn after DB readiness):
+#    the compose api entrypoint is: python /opt/dafi/wait_for_postgres.py uvicorn ...
 
 # 3. In production, set DAFI_PRODUCTION_POSTURE=1 to refuse the dev factory:
 export DAFI_PRODUCTION_POSTURE=1
@@ -162,11 +215,12 @@ on the page that triggered it.
 ### Run the slice tests
 
 ```bash
-# Backend
-uv run pytest tests/dafi_sentinel/test_api_auth.py \
-               tests/dafi_sentinel/test_api_endpoints.py -v
+# Backend (containerized, lock-exact)
+podman run --rm dafi-sentinel-test:local pytest \
+  tests/dafi_sentinel/test_api_auth.py \
+  tests/dafi_sentinel/test_api_endpoints.py -v
 
-# Frontend
+# Frontend (host-based until PR-B)
 cd frontend && npm run test && npm run build
 ```
 
@@ -213,5 +267,5 @@ records ``PolicyDecision(allowed=False, reason="approval-denied")``.
 Run the slice tests:
 
 ```bash
-uv run pytest tests/dafi_sentinel/test_orchestration.py -v
+podman run --rm dafi-sentinel-test:local pytest tests/dafi_sentinel/test_orchestration.py -v
 ```

@@ -9,14 +9,18 @@ design D7):
 * T1: the ``runtime`` target builds and the image runs as uid 10001.
 * T2: the ``test`` target builds and the default suite passes in-image
   (a nonzero exit, including pytest's exit-5 empty-collection code, fails).
-* T3: the compose file renders and the api service is profile-gated
-  (plain config stays postgres-only).
+* T3: the compose file renders, the api service is profile-gated
+  (plain config stays postgres-only), every published port is
+  loopback-only, and no host ``.venv`` path is mounted.
+* T4: a bare ``podman build`` (no ``--target``) yields the deployable
+  runtime leaf — uvicorn entrypoint running as uid 10001.
 
 Podman-dependent guards skip cleanly when podman is absent so podman-less
 CI stays green (exit 0). No new pytest markers are registered — the
 project runs with ``--strict-markers`` — so only the built-in ``skipif``
-mark is used. Builds must use the explicit ``-f infra/podman/Containerfile``
-form because the Containerfile lives outside the repo-root build context.
+mark is used. Builds pass ``-f infra/podman/Containerfile`` explicitly
+because podman resolves ignorefiles from the context root, not from the
+Containerfile directory.
 """
 
 import shutil
@@ -159,4 +163,61 @@ def test_compose_config_renders_with_profile_gated_api():
         check=False,
     )
     assert profiled.returncode == 0, profiled.stderr[-2000:]
-    assert "api" in yaml.safe_load(profiled.stdout)["services"]
+    rendered = yaml.safe_load(profiled.stdout)["services"]
+    assert "api" in rendered
+
+    # Spec R4/R3 enforcement: loopback-only publish and no host .venv
+    # mounts anywhere in the rendered stack.
+    for service in rendered.values():
+        for port in service.get("ports", []) or []:
+            assert str(port).startswith("127.0.0.1:"), f"non-loopback publish: {port}"
+        for volume in service.get("volumes", []) or []:
+            source = str(volume.split(":")[0] if isinstance(volume, str) else volume.get("source", ""))
+            assert ".venv" not in source, f"host .venv mounted: {volume}"
+
+
+@requires_podman
+def test_bare_build_defaults_to_runtime_leaf():
+    """T4: `podman build` without --target yields the deployable runtime."""
+    default_image = "dafi-sentinel-default:local"
+    build = subprocess.run(
+        ["podman", "build", "-f", CONTAINERFILE, "-t", default_image, "."],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=BUILD_TIMEOUT,
+        check=False,
+    )
+    try:
+        assert build.returncode == 0, build.stderr[-4000:]
+
+        user = subprocess.run(
+            ["podman", "image", "inspect", "-f", "{{.Config.User}}", default_image],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert user.returncode == 0, user.stderr
+        assert user.stdout.strip() == "10001"
+
+        command = subprocess.run(
+            ["podman", "image", "inspect", "-f", '{{join .Config.Cmd " "}}', default_image],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert command.returncode == 0, command.stderr
+        assert "default_workbench_app" in command.stdout
+    finally:
+        subprocess.run(
+            ["podman", "rmi", "-f", default_image],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )

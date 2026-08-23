@@ -48,6 +48,12 @@ def main():
     if not dsn:
         fail("DAFI_PGVECTOR_DSN is not set; cannot probe PostgreSQL.")
 
+    # Validate usage BEFORE any polling so a missing command fails fast
+    # instead of burning the whole readiness deadline first.
+    command = sys.argv[1:]
+    if not command:
+        fail("No command supplied to exec after readiness (usage: wait_for_postgres.py CMD [ARGS...]).")
+
     raw_timeout = os.environ.get("WAIT_TIMEOUT", DEFAULT_TIMEOUT_SECONDS)
     try:
         timeout = float(raw_timeout)
@@ -75,10 +81,6 @@ def main():
             time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
     print("wait_for_postgres: PostgreSQL is ready; handing off.", file=sys.stderr)
-
-    command = sys.argv[1:]
-    if not command:
-        fail("No command supplied to exec after readiness (usage: wait_for_postgres.py CMD [ARGS...]).")
 
     os.execvp(command[0], command)
 
