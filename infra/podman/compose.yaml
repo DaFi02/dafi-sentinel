@@ -1,15 +1,15 @@
 version: "3.8"
 
-# Podman Compose stack for the DAFI Sentinel PR3 retrieval smoke.
+# Podman Compose stack for the DAFI Sentinel retrieval smoke + API.
 #
-# Bring up with:
-#   podman compose -f infra/podman/compose.yaml up -d
-# Run the smoke:
+# Bring up with (postgres only; add --profile api for the API):
+#   podman-compose -f infra/podman/compose.yaml up -d
+# Host-side legacy smoke (uses the published port):
 #   DAFI_PGVECTOR_SMOKE=1 \
 #   DAFI_PGVECTOR_DSN=postgresql://sentinel:sentinel@127.0.0.1:55432/sentinel \
 #   uv run pytest tests/dafi_sentinel/test_pgvector_adapter.py -v
 # Tear down:
-#   podman compose -f infra/podman/compose.yaml down -v
+#   podman-compose -f infra/podman/compose.yaml down -v
 #
 # Serve the API against this database (profile-gated, design D4):
 #   podman-compose -f infra/podman/compose.yaml --profile api up -d
@@ -52,6 +52,9 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       DAFI_PGVECTOR_DSN: "postgresql://sentinel:sentinel@postgres:5432/sentinel"
+      # Uncomment to keep the generated dev password out of container logs
+      # (when unset, default_workbench_app prints a fresh password at boot):
+      # DAFI_DEV_PASSWORD: "change-me-local-dev-only"
     depends_on:
       postgres:
         condition: service_healthy

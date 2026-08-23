@@ -53,7 +53,8 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 
 FROM deps-full AS test
 
-# Manifests first (cacheable), then source; fixtures ride along under tests/.
+# Source on top of the inherited manifests so the test leaf stays
+# consistent even if deps-full's own manifest layers are retargeted.
 COPY pyproject.toml uv.lock ./
 COPY dafi_sentinel ./dafi_sentinel
 COPY tests ./tests
