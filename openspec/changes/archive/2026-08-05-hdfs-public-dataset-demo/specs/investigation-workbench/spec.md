@@ -1,17 +1,11 @@
-# Investigation Workbench Specification
+# Delta for Investigation Workbench
 
-> **Source**: Archived from `openspec/changes/dafi-sentinel/specs/investigation-workbench/spec.md` on 2026-07-14.
-> Initial canonical version (no prior canonical spec existed).
-
-## Purpose
-
-Provide a dashboard-owned workspace for authenticated sessions, timelines, hypotheses, evidence-cited answers, and controlled charts.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Evidence-Cited Investigation Sessions
 
 The system MUST let authenticated users inspect owned incident sessions, ask questions, and receive answers that cite evidence IDs. For public benchmark evidence, the workbench MUST visibly show source provenance, original trace identifier, benchmark label, and an operational-benchmark disclaimer stating that labels are not cybersecurity attack conclusions.
+(Previously: Sessions exposed evidence-cited answers without public-benchmark provenance and disclaimer requirements.)
 
 #### Scenario: User asks incident question
 
@@ -39,21 +33,3 @@ The system MUST let authenticated users inspect owned incident sessions, ask que
 - GIVEN a session contains locally prepared HDFS_v1 evidence
 - WHEN an analyst views its evidence
 - THEN provenance, trace identifier, label, and disclaimer are visible
-
-### Requirement: Dashboard-Owned Charts
-
-The system MUST generate dashboard chart specifications and MUST NOT require Grafana, Prometheus, or external monitoring dashboards.
-
-#### Scenario: Generate approved chart
-
-- GIVEN a user requests a chart from investigation evidence
-- WHEN the chart action is approved
-- THEN controlled Python chart generation produces a dashboard-renderable chart artifact
-- AND the chart cites the evidence used to build it
-
-#### Scenario: Chart action denied
-
-- GIVEN a chart request requires Python execution
-- WHEN approval is denied
-- THEN no Python chart generation runs
-- AND the denial is visible in the session audit log
