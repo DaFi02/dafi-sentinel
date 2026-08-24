@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 import uuid
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -55,6 +56,7 @@ from dafi_sentinel.api.auth import (
     hash_session_id,
     require_owner,
 )
+from dafi_sentinel.api.demo_seed import seed_local_hdfs_demo
 from dafi_sentinel.api.schemas import (
     AuditEntryResponse,
     AuditsResponse,
@@ -765,6 +767,9 @@ def default_workbench_app() -> FastAPI:
         audits=InMemoryAuditRepository(),
         retrieval_index=InMemoryRetrievalIndex(()),
     )
+    demo_path = os.environ.get("DAFI_HDFS_DEMO_PATH")
+    if demo_path:
+        seed_local_hdfs_demo(workbench, owner_id="user-1", demo_path=Path(demo_path))
     return create_workbench_app(
         auth=AuthService(users=users, sessions=InMemorySessionStore()),
         workbench=workbench,

@@ -8,7 +8,10 @@ evidence, and exercise every endpoint over :class:`fastapi.testclient.TestClient
 from __future__ import annotations
 
 import base64
+import json
 from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -264,6 +267,157 @@ def test_get_evidence_returns_403_when_record_belongs_to_another_user():
     response = client.get("/evidence/ev-incident-private", headers=_auth(ada_token))
 
     assert response.status_code == 403
+
+
+def test_default_app_only_seeds_validated_local_hdfs_evidence_when_explicitly_opted_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The optional HDFS demo retains source metadata and belongs to the analyst."""
+    from dafi_sentinel.api import app as app_module
+    from dafi_sentinel.api import demo_seed
+    from dafi_sentinel.ingestion.hdfs_v1 import HDFS_V1_CITATIONS, LOGHUB_NOTICE
+
+    demo_root = tmp_path / ".local" / "hdfs-v1" / "output"
+    demo_root.mkdir(parents=True)
+    demo_path = demo_root / "normalized.jsonl"
+    demo_path.write_text(
+        json.dumps(
+            {
+                "incident_id": "hdfs-v1-blk_42",
+                "timestamp": "2000-01-01T00:00:01+00:00",
+                "source": {"uri": "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content", "row": 42},
+                "summary": "Receiving block blk_42",
+                "fields": {
+                    "dataset.name": "LogHub HDFS_v1",
+                    "dataset.version": "10.5281/zenodo.8196385",
+                    "dataset.checksum": "md5:76a24b4d9a6164d543fb275f89773260",
+                    "dataset.trace_id": "blk_42",
+                    "dataset.label": "Anomaly",
+                    "dataset.label_semantics": "Operational benchmark metadata; not a cybersecurity attack conclusion.",
+                    "dataset.selection_rule": "first 1 trace per label after label and trace ID sorting",
+                    "dataset.attribution.notice": LOGHUB_NOTICE,
+                    "dataset.attribution.citations": list(HDFS_V1_CITATIONS),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(demo_seed, "LOCAL_HDFS_ROOT", tmp_path / ".local" / "hdfs-v1")
+    monkeypatch.setenv("DAFI_HDFS_DEMO_PATH", str(demo_path))
+    monkeypatch.setenv("DAFI_DEV_PASSWORD", "demo-password")
+
+    client = TestClient(app_module.default_workbench_app())
+    _login(client, password="demo-password")
+
+    response = client.get("/evidence")
+
+    assert response.status_code == 200
+    hdfs = next(item for item in response.json() if item["fields"].get("dataset.name") == "LogHub HDFS_v1")
+    assert hdfs["source_uri"] == "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content"
+    assert hdfs["source_row"] == 42
+    assert hdfs["fields"]["dataset.trace_id"] == "blk_42"
+    assert hdfs["fields"]["dataset.label"] == "Anomaly"
+    assert hdfs["fields"]["dataset.label_semantics"] == (
+        "Operational benchmark metadata; not a cybersecurity attack conclusion."
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("dataset.version", "forged-version", "invalid dataset version"),
+        ("dataset.checksum", "md5:" + "0" * 32, "invalid dataset checksum"),
+        ("dataset.attribution.notice", None, "missing required provenance fields"),
+        ("dataset.attribution.notice", "forged notice", "invalid dataset attribution notice"),
+        ("dataset.attribution.citations", None, "missing required provenance fields"),
+        ("dataset.attribution.citations", ["forged citation"], "invalid dataset attribution citations"),
+    ],
+)
+def test_default_app_rejects_forged_or_missing_hdfs_source_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    error: str,
+):
+    """The opt-in runtime loader accepts only provenance emitted by HDFS_v1 preparation."""
+    from dafi_sentinel.api import app as app_module
+    from dafi_sentinel.api import demo_seed
+    from dafi_sentinel.ingestion.hdfs_v1 import HDFS_V1_CITATIONS, LOGHUB_NOTICE
+
+    demo_root = tmp_path / ".local" / "hdfs-v1" / "output"
+    demo_root.mkdir(parents=True)
+    fields: dict[str, object] = {
+        "dataset.name": "LogHub HDFS_v1",
+        "dataset.version": "10.5281/zenodo.8196385",
+        "dataset.checksum": "md5:76a24b4d9a6164d543fb275f89773260",
+        "dataset.trace_id": "blk_42",
+        "dataset.label": "Anomaly",
+        "dataset.label_semantics": "Operational benchmark metadata; not a cybersecurity attack conclusion.",
+        "dataset.selection_rule": "first 1 trace per label after label and trace ID sorting",
+        "dataset.attribution.notice": LOGHUB_NOTICE,
+        "dataset.attribution.citations": list(HDFS_V1_CITATIONS),
+    }
+    if value is None:
+        del fields[field]
+    else:
+        fields[field] = value
+    demo_path = demo_root / "normalized.jsonl"
+    demo_path.write_text(
+        json.dumps(
+            {
+                "incident_id": "hdfs-v1-blk_42",
+                "timestamp": "2000-01-01T00:00:01+00:00",
+                "source": {"uri": "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content", "row": 42},
+                "summary": "Receiving block blk_42",
+                "fields": fields,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(demo_seed, "LOCAL_HDFS_ROOT", tmp_path / ".local" / "hdfs-v1")
+    monkeypatch.setenv("DAFI_HDFS_DEMO_PATH", str(demo_path))
+
+    with pytest.raises(RuntimeError, match=error):
+        app_module.default_workbench_app()
+
+
+def test_default_app_fails_with_setup_guidance_when_opted_in_hdfs_corpus_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from dafi_sentinel.api import app as app_module
+    from dafi_sentinel.api import demo_seed
+
+    monkeypatch.setattr(demo_seed, "LOCAL_HDFS_ROOT", tmp_path / ".local" / "hdfs-v1")
+    monkeypatch.setenv("DAFI_HDFS_DEMO_PATH", str(tmp_path / ".local" / "hdfs-v1" / "output" / "missing.jsonl"))
+
+    with pytest.raises(RuntimeError, match="prepare the local-only HDFS_v1 demo first"):
+        app_module.default_workbench_app()
+
+
+def test_default_app_rejects_outside_root_hdfs_path_before_seeding_or_downloading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An arbitrary environment path cannot make the dev factory touch corpus data."""
+    from dafi_sentinel.api import app as app_module
+    from dafi_sentinel.api import demo_seed
+    from dafi_sentinel.ingestion import hdfs_v1
+
+    local_root = tmp_path / ".local" / "hdfs-v1"
+    read_rows = Mock()
+    prepare_demo = Mock()
+    monkeypatch.setattr(demo_seed, "LOCAL_HDFS_ROOT", local_root)
+    monkeypatch.setattr(demo_seed, "_read_validated_rows", read_rows)
+    monkeypatch.setattr(hdfs_v1, "prepare_local_demo", prepare_demo)
+    monkeypatch.setenv("DAFI_HDFS_DEMO_PATH", str(tmp_path / "outside-root.jsonl"))
+
+    with pytest.raises(RuntimeError, match="DAFI_HDFS_DEMO_PATH must be below"):
+        app_module.default_workbench_app()
+
+    read_rows.assert_not_called()
+    prepare_demo.assert_not_called()
 
 
 # ---------------------------------------------------------------------- #
