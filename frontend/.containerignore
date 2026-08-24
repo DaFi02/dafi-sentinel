@@ -1,0 +1,22 @@
+# Build-context denylist for the dedicated frontend context (design D2).
+# podman reads ignorefiles from the CONTEXT root, so this file must live
+# at frontend/.containerignore — the repo-root ignorefile denies frontend/
+# entirely and would empty every COPY.
+#
+# Host dependencies and build output.
+node_modules/
+dist/
+dist-ssr/
+.vite/
+coverage/
+*.tsbuildinfo
+# Emitted configs shadow the tracked .ts sources on host runs; they must
+# never enter image layers either (tracked .ts beats emitted artifacts).
+vite.config.js
+vite.config.d.ts
+vitest.config.js
+vitest.config.d.ts
+src/vite/*.js
+src/vite/*.d.ts
+# Self-denial: a context-root ignorefile would otherwise leak into layers.
+.containerignore

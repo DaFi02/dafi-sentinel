@@ -14,6 +14,9 @@ design D7):
   loopback-only, and no host ``.venv`` path is mounted.
 * T4: a bare ``podman build`` (no ``--target``) yields the deployable
   runtime leaf — uvicorn entrypoint running as uid 10001.
+* T7 (always-on): the dedicated ``frontend`` build context denylist
+  excludes host artifacts (``node_modules/``, build output, emitted
+  config shadows) and itself, so only tracked sources enter web images.
 
 Podman-dependent guards skip cleanly when podman is absent so podman-less
 CI stays green (exit 0). No new pytest markers are registered — the
@@ -90,6 +93,57 @@ def test_containerignore_denylist_blocks_host_venv_and_git():
     # Host virtualenv and VCS metadata must never reach an image layer.
     assert "**/.venv/" in patterns
     assert ".git/" in patterns
+
+
+def test_t7_frontend_containerignore_denylist_blocks_host_artifacts():
+    """T7: the frontend context denylist denies host artifacts on every host.
+
+    Always-on on every host (no skipif mark — runs podman-less, restoring
+    the PR-A every-host carve-out). The dedicated ``frontend`` context must
+    never ship host ``node_modules``, build output, emitted ``.js``/
+    ``.d.ts`` config shadows (they resolve before the tracked ``.ts``
+    sources), or the ignorefile itself (design D2 self-denial).
+    """
+    ignore_path = PROJECT_ROOT / "frontend" / ".containerignore"
+    if not ignore_path.exists():
+        if (PROJECT_ROOT / ".git").exists():
+            pytest.fail(
+                "frontend/.containerignore missing: the web build context "
+                "would leak host node_modules and emitted config shadows "
+                "into layers"
+            )
+        # In-image runs have no build context: the root denylist excludes
+        # frontend/ and .git/, so their co-absence marks containerized exec.
+        pytest.skip("not a host build context (no .git)")
+
+    content = ignore_path.read_text(encoding="utf-8")
+    patterns = {
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    denied = {
+        # Host dependencies and build output.
+        "node_modules/",
+        "dist/",
+        "dist-ssr/",
+        ".vite/",
+        "coverage/",
+        "*.tsbuildinfo",
+        # Emitted root configs that shadow the tracked .ts sources.
+        "vite.config.js",
+        "vite.config.d.ts",
+        "vitest.config.js",
+        "vitest.config.d.ts",
+        # Emitted src/vite artifacts that shadow csp-toggle.ts resolution.
+        "src/vite/*.js",
+        "src/vite/*.d.ts",
+        # Self-denial: a context-root ignorefile otherwise enters layers.
+        ".containerignore",
+    }
+    missing = denied - patterns
+    assert not missing, f"frontend/.containerignore misses denials: {sorted(missing)}"
 
 
 @requires_podman
