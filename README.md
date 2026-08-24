@@ -2,6 +2,8 @@
 
 DAFI Sentinel is a security-first incident investigation workbench.
 
+For a concise explanation of the product, its investigation flow, technical decisions, and honest AI-assisted portfolio framing, see [PORTFOLIO.md](PORTFOLIO.md).
+
 ## Quick start
 
 All backend workflows run in rootless Podman containers. Build both
@@ -29,6 +31,41 @@ without `podman`, so CI stays green either way.
 | Optional fast loop | Read-only bind mount labeled `:Z` (SELinux) + named volume at `/app/.venv` |
 | Env contract | `DAFI_PGVECTOR_SMOKE` · `DAFI_PGVECTOR_DSN` · `WAIT_TIMEOUT` (default 60 s) |
 | Rebuild gotcha | Compose reuses its own `<project>_api` image across ups — find it with `podman images \| grep api` and `podman rmi` it after manual target rebuilds |
+
+## Local-only HDFS_v1 demo
+
+This optional demo makes locally prepared [LogHub HDFS_v1](https://github.com/logpai/loghub/tree/master/HDFS) operational-benchmark evidence visible in the workbench. It is not a cybersecurity-incident corpus: `Normal` and `Anomaly` are source benchmark metadata, **not cybersecurity attack conclusions**.
+
+### Reproducible reviewer walkthrough
+
+1. Review the [LogHub license](https://github.com/logpai/loghub/blob/master/LICENSE), the [HDFS_v1 documentation](https://github.com/logpai/loghub/tree/master/HDFS), and the [pinned Zenodo record](https://zenodo.org/records/8196385). The official artifact is `https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content` (DOI `10.5281/zenodo.8196385`).
+2. Prepare the corpus only after accepting those terms:
+
+   ```bash
+   uv run python scripts/prepare_hdfs_v1_demo.py --acknowledge-loghub-terms
+   ```
+
+   The command validates the published `md5:76a24b4d9a6164d543fb275f89773260`, deterministically writes `.local/hdfs-v1/output/normalized.jsonl`, and fails before download when the acknowledgement is absent. No official SHA-256 is published for this artifact; the project does not claim one.
+3. Start the development API with that prepared local file explicitly enabled:
+
+   ```bash
+   export DAFI_HDFS_DEMO_PATH="$PWD/.local/hdfs-v1/output/normalized.jsonl"
+   uv run uvicorn dafi_sentinel.api.app:default_workbench_app --reload
+   ```
+
+   Start the dashboard as described below, sign in with the development credential printed by the API, open an HDFS evidence item, and inspect its detail view. The API `GET /evidence/{id}` and the dashboard provenance panel show the source URI, version/checksum reference, trace ID, benchmark label, and the operational-benchmark disclaimer.
+
+### Provenance and distribution boundary
+
+| Topic | Evidence / boundary |
+|---|---|
+| Attribution | LogHub HDFS_v1; cite Xu et al. (SOSP 2009) and Zhu et al. (LogHub, ISSRE 2023) as requested by the official HDFS documentation. |
+| Terms | LogHub makes datasets available for research or academic work and requires its notice and citation where applicable; preparation requires explicit acknowledgement. |
+| Integrity | The pinned Zenodo record publishes the MD5 above. No official SHA-256 is published. |
+| Corpus handling | Raw archive, cache, and normalized JSONL stay under ignored `.local/hdfs-v1/`; they are **not committed or redistributed**. No starter subset is shipped. |
+| Labels | `Normal` / `Anomaly` remain operational benchmark metadata, not cybersecurity attack conclusions. |
+
+The repository intentionally does not resolve the ambiguous permission for a normalized derivative. To roll back the optional demo, unset `DAFI_HDFS_DEMO_PATH` and delete `.local/hdfs-v1/`; default API startup remains unseeded.
 
 ## Run the pgvector smoke (PR3)
 
