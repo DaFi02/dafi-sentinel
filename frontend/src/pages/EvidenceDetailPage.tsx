@@ -28,6 +28,13 @@ export function EvidenceDetailPage() {
   if (!record) {
     return <p className="muted">no evidence</p>;
   }
+  const datasetName = record.fields["dataset.name"];
+  const isHdfsBenchmark = datasetName === "LogHub HDFS_v1";
+  const traceId = record.fields["dataset.trace_id"];
+  const label = record.fields["dataset.label"];
+  const labelSemantics = record.fields["dataset.label_semantics"];
+  const version = record.fields["dataset.version"];
+  const checksum = record.fields["dataset.checksum"];
   return (
     <main>
       <p>
@@ -45,6 +52,18 @@ export function EvidenceDetailPage() {
       <p>
         <strong>redacted summary:</strong> {record.redacted_summary}
       </p>
+      {isHdfsBenchmark ? (
+        <section aria-label="Public benchmark provenance">
+          <h3>Public benchmark provenance</h3>
+          <p><strong>Dataset:</strong> LogHub HDFS_v1</p>
+          <p><strong>Original trace ID:</strong> {String(traceId)}</p>
+           <p><strong>Benchmark label:</strong> {String(label)}</p>
+           <p><strong>Source attribution:</strong> {record.source_uri}</p>
+           <p><strong>Source version:</strong> {String(version)}</p>
+           <p><strong>Source checksum:</strong> {String(checksum)}</p>
+           <p role="note">{String(labelSemantics)}</p>
+        </section>
+      ) : null}
       {Object.keys(record.fields).length > 0 ? (
         <section>
           <h3>fields</h3>

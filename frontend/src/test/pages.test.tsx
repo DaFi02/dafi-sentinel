@@ -162,6 +162,43 @@ describe("evidence detail", () => {
     });
   });
 
+  it("renders HDFS provenance and benchmark-only label framing", async () => {
+    const fetchStub = makeFetch({
+      "GET /sessions/me": seedSessionResponse(),
+      "GET /evidence/ev-hdfs": () =>
+        new Response(
+          JSON.stringify({
+            evidence_id: "ev-hdfs",
+            source_uri: "https://zenodo.org/records/8196385",
+            source_row: 42,
+            source_offset: null,
+            redacted_summary: "Receiving block blk_42",
+            timestamp: "2000-01-01T00:00:01Z",
+            fields: {
+              "dataset.name": "LogHub HDFS_v1",
+              "dataset.version": "10.5281/zenodo.8196385",
+              "dataset.checksum": "md5:76a24b4d9a6164d543fb275f89773260",
+              "dataset.trace_id": "blk_42",
+              "dataset.label": "Anomaly",
+              "dataset.label_semantics": "Operational benchmark metadata; not a cybersecurity attack conclusion.",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    vi.stubGlobal("fetch", fetchStub);
+
+    renderAt(null, "/evidence/ev-hdfs");
+
+    await waitFor(() => {
+      expect(screen.getByRole("region", { name: /public benchmark provenance/i })).toHaveTextContent("blk_42");
+      expect(screen.getByRole("region", { name: /public benchmark provenance/i })).toHaveTextContent("Anomaly");
+      expect(screen.getByRole("region", { name: /public benchmark provenance/i })).toHaveTextContent("10.5281/zenodo.8196385");
+      expect(screen.getByRole("region", { name: /public benchmark provenance/i })).toHaveTextContent("md5:76a24b4d9a6164d543fb275f89773260");
+      expect(screen.getByRole("note")).toHaveTextContent(/not a cybersecurity attack conclusion/i);
+    });
+  });
+
   it("shows a 403 message when the evidence belongs to another account", async () => {
     const fetchStub = makeFetch({
       "GET /sessions/me": seedSessionResponse(),
