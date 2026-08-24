@@ -26,11 +26,12 @@ without `podman`, so CI stays green either way.
 
 | Concern | Rule |
 |---|---|
-| Ports | Loopback publish only, >1024 (`127.0.0.1:8000`, `127.0.0.1:55432`) |
+| Ports | Loopback publish only, >1024 (`127.0.0.1:8000`, `127.0.0.1:55432`, web `127.0.0.1:5173`) |
+| Images | Guard builds `dafi-sentinel-{api,test,web}:local`; compose owns `localhost/<project>_{api,web}` (`<project>` = compose-file dir name ⇒ `podman`) |
 | Host `.venv` | NEVER mounted or baked — images sync lock-exact via `uv sync --locked` |
 | Optional fast loop | Read-only bind mount labeled `:Z` (SELinux) + named volume at `/app/.venv` |
-| Env contract | `DAFI_PGVECTOR_SMOKE` · `DAFI_PGVECTOR_DSN` · `WAIT_TIMEOUT` (default 60 s) |
-| Rebuild gotcha | Compose reuses its own `<project>_api` image across ups — find it with `podman images \| grep api` and `podman rmi` it after manual target rebuilds |
+| Env contract | `DAFI_PGVECTOR_SMOKE` · `DAFI_PGVECTOR_DSN` · `WAIT_TIMEOUT` (default 60 s) · `DAFI_API_PROXY_TARGET` · `DAFI_COMPOSED_E2E=1` |
+| Rebuild gotcha | Compose reuses its own `<project>_{api,web}` images across ups — plain `podman rmi <tag>` only untags (the guard `:local` tags pin identical content), so hard-delete with `podman rmi -f localhost/podman_api localhost/podman_web` then `up -d --build` |
 
 ## Local-only HDFS_v1 demo
 
@@ -239,11 +240,88 @@ Every stateful action writes an ``AuditRecord`` through the
 
 ### Run the dashboard
 
+The dashboard ships as rootless Podman containers — no host Node.js
+required. One command boots postgres → api → web (vite dev server):
+
+```bash
+podman-compose -f infra/podman/compose.yaml --profile api --profile web up -d
+```
+
+Open <http://127.0.0.1:5173> and sign in with the development credential
+printed by the api log. The web service publishes loopback-only
+(`127.0.0.1:5173:5173`) and mounts nothing — source and deps are baked
+into the image. BOTH profiles are mandatory: podman-compose does not
+auto-enable depended-on services gated behind another profile, so
+`--profile web` alone dies at boot.
+
+```bash
+# Teardown (add -v to drop the database volume):
+podman-compose -f infra/podman/compose.yaml --profile api --profile web down -v
+```
+
+#### Proxy environment contract
+
+vite proxies `/sessions`, `/evidence`, `/qa`, `/charts`, `/roles`, and
+`/audits` through one variable:
+
+| Context | `DAFI_API_PROXY_TARGET` |
+|---|---|
+| Host run (unset) | `http://127.0.0.1:8000` (default — legacy behavior byte-identical) |
+| Compose `web` service | `http://api:8000` (compose-injected) |
+
+#### Stale composed images
+
+After pulling new commits, compose may keep serving a stale
+`localhost/podman_api` / `localhost/podman_web` image; guard T9 fails
+naming it. Plain `rmi` only untags (guard-built `:local` tags pin
+identical content), so hard-delete before rebuilding:
+
+```bash
+podman rmi -f localhost/podman_api localhost/podman_web && \
+podman-compose -f infra/podman/compose.yaml --profile api --profile web up -d --build
+```
+
+#### Composed-boot E2E gate (`DAFI_COMPOSED_E2E=1`)
+
+An opt-in end-to-end test boots the real chain and polls api + web +
+one proxied route:
+
+```bash
+# Precondition: host ports 8000 AND 5173 free (check: ss -ltn)
+DAFI_COMPOSED_E2E=1 uv run pytest tests/dafi_sentinel/test_container_workflow.py -k e2e -v
+```
+
+Teardown removes its unique compose project's containers, networks,
+AND images, pass or fail.
+
+> **WARNING: shadowing artifacts (host Node runs only).** Gitignored
+> emitted artifacts shadow tracked sources when you edit
+> `frontend/vite.config.ts` or anything under `frontend/src/vite/` and
+> then run vitest/vite on the host — stale `.js`/`.d.ts` resolve before
+> the `.ts`. Delete all six patterns first (`rm -f` tolerates absence —
+> never assume counts); container runs are immune because
+> `frontend/.containerignore` excludes every pattern:
+>
+> ```bash
+> rm -f frontend/vite.config.{js,d.ts} frontend/vitest.config.{js,d.ts} \
+>       frontend/src/vite/*.js frontend/src/vite/*.d.ts
+> ```
+>
+> zsh note: unmatched globs abort the command ("no matches found") —
+> run under bash or `setopt null_glob` first.
+
+#### Fallback: host Node workflow
+
+Requires Node.js ≥20 locally; run the six-pattern cleanup above before
+any host-side verification of config/`src/vite` edits.
+
 ```bash
 cd frontend
 npm install
-npm run dev      # http://127.0.0.1:5173, proxies /sessions, /evidence,
-                 # /qa, /charts, /roles, /audits to http://127.0.0.1:8000
+npm run dev      # serves http://localhost:5173 (vite binds "localhost" —
+                 # v4 or v6 loopback per host), proxies /sessions,
+                 # /evidence, /qa, /charts, /roles, /audits to
+                 # http://127.0.0.1:8000
 ```
 
 The dashboard uses TanStack Query for server state, Recharts for
@@ -260,8 +338,11 @@ podman run --rm dafi-sentinel-test:local pytest \
   tests/dafi_sentinel/test_api_auth.py \
   tests/dafi_sentinel/test_api_endpoints.py -v
 
-# Frontend (host-based until PR-B)
-cd frontend && npm run test && npm run build
+# Frontend (containerized, lock-exact — image built by the web guards)
+podman build -f infra/podman/Containerfile.web -t dafi-sentinel-web:local frontend
+podman run --rm dafi-sentinel-web:local npm run test
+
+# Frontend fallback (host Node): cd frontend && npm run test && npm run build
 ```
 
 ## Later slices
