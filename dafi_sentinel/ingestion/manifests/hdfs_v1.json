@@ -1,0 +1,18 @@
+{
+  "dataset": {
+    "name": "LogHub HDFS_v1",
+    "version": "10.5281/zenodo.8196385"
+  },
+  "source": {
+    "uri": "https://zenodo.org/api/records/8196385/files/HDFS_v1.zip/content",
+    "checksum": "md5:76a24b4d9a6164d543fb275f89773260",
+    "checksum_note": "Zenodo publishes this MD5. No official SHA-256 is published."
+  },
+  "terms": {
+    "acknowledgement": "I acknowledge that LogHub datasets are for research or academic work, require the LogHub notice and citations where applicable, and remain local-only in this repository.",
+    "notice_url": "https://github.com/logpai/loghub/blob/master/LICENSE"
+  },
+  "expected_files": ["HDFS.log_structured.csv", "anomaly_label.csv"],
+  "allowed_labels": ["Normal", "Anomaly"],
+  "selection": {"per_label": 10}
+}

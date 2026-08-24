@@ -20,3 +20,6 @@ frontend/vitest.config.d.ts
 frontend/vitest.config.js
 frontend/src/vite/*.d.ts
 frontend/src/vite/*.js
+
+# Local-only LogHub HDFS_v1 download cache and normalized output
+.local/hdfs-v1/
