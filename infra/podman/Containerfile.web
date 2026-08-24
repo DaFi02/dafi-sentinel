@@ -1,0 +1,70 @@
+# Multi-stage Containerfile for the DAFI Sentinel dashboard dev server
+# (rootless Podman, change podman-frontend-containerization).
+#
+# Stage graph (design D1):
+#   base -> deps -> dev   (vite dev server, LAST target)
+#
+# Builds ONLY from the dedicated frontend/ build context:
+#   podman build -f infra/podman/Containerfile.web --target dev <frontend>
+# The context root carries .containerignore so host node_modules and
+# emitted config shadows never enter layers (design D2); a repo-root
+# context would be empty because the root ignorefile denies frontend/.
+# Dependency sync is lock-exact (`npm ci` fails on manifest/lock drift,
+# design D3) with an npm cache mount speeding rebuilds without entering
+# layers. The dev target is declared last so a bare build yields the
+# dev server; the vitest suite runs against it via `npm run test`.
+
+ARG NODE_TAG=22-bookworm-slim
+
+FROM docker.io/library/node:${NODE_TAG} AS base
+
+# ca-certificates is the only package requirement: registry.npmjs.org is
+# HTTPS. Installed portably (apt on Debian family, apk on Alpine) so the
+# NODE_TAG ARG genuinely spans official node image families (spec R1).
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends ca-certificates \
+        && rm -rf /var/lib/apt/lists/*; \
+    else \
+        apk add --no-cache ca-certificates; \
+    fi
+
+WORKDIR /app
+
+# Dedicated unprivileged identity for the dev leaf (design D3), portable
+# across shadow-utils (Debian) and BusyBox (Alpine) tooling.
+RUN set -eux; \
+    if command -v useradd >/dev/null 2>&1; then \
+        groupadd --gid 10001 appuser \
+        && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/appuser appuser; \
+    else \
+        addgroup -g 10001 appuser \
+        && adduser -u 10001 -G appuser -D -h /home/appuser appuser; \
+    fi
+
+FROM base AS deps
+
+# Manifests before sources: lockfile-only edits rebuild deps without
+# invalidating source layers (PR-A cache lesson).
+COPY package.json package-lock.json ./
+# Lock-exact install: npm ci errors when package.json and package-lock.json
+# disagree instead of re-resolving. Ownership flips to uid 10001 because the
+# vite dev server writes its dep-optimize cache into node_modules/.vite.
+RUN --mount=type=cache,id=npm-cache,target=/root/.npm \
+    npm ci \
+    && chown -R 10001:10001 /app/node_modules
+
+FROM deps AS dev
+
+COPY index.html vite.config.ts tsconfig.json tsconfig.node.json ./
+COPY src ./src
+
+# The dev server loads its TS config by writing a bundled
+# vite.config.ts.timestamp-*.mjs NEXT TO the config, so /app itself must be
+# writable by uid 10001 (files stay root-owned; node_modules is chowned in
+# the deps stage for the same runtime-write reason).
+RUN chown 10001:10001 /app
+
+USER 10001
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--strictPort"]
