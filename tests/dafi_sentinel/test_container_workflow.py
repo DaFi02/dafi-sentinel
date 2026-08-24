@@ -411,7 +411,14 @@ def test_t8_compose_web_profile_gated_with_loopback_publish():
 
 
 def _image_input_paths() -> list[Path]:
-    """Tracked inputs whose edits invalidate the composed api/web images."""
+    """Tracked inputs whose edits invalidate the composed **web** image.
+
+    Covers the Containerfiles plus frontend manifests, configs, and sources.
+    Backend runtime inputs (``dafi_sentinel/**``, ``pyproject.toml``,
+    ``uv.lock``) are deliberately out of scope: a Python-only edit can leave a
+    stale composed ``podman_api`` undetected by this guard — rebuild the api
+    image explicitly after backend changes.
+    """
     return sorted(
         {
             *PROJECT_ROOT.glob("infra/podman/Containerfile*"),
@@ -633,6 +640,33 @@ def test_e2e_composed_boot_serves_dashboard_chain():
             timeout=E2E_TIMEOUT,
             check=False,
         )
+        # ``down -v`` removes containers/networks/volumes but leaves the
+        # project-scoped build images behind (~1 GB per gated run). Sweep
+        # them tolerantly so repeated runs never erode disk silently.
+        listing = subprocess.run(
+            [
+                "podman",
+                "images",
+                "--format",
+                "{{.ID}}",
+                "--filter",
+                f"reference=*{project}_*",
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=E2E_TIMEOUT,
+            check=False,
+        )
+        for image_id in listing.stdout.split():
+            subprocess.run(
+                ["podman", "rmi", "-f", image_id],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=E2E_TIMEOUT,
+                check=False,
+            )
         if failure is None:
             assert down.returncode == 0, down.stderr[-2000:]
             residue = _compose_residue(project)
