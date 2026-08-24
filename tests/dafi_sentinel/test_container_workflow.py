@@ -21,6 +21,12 @@ design D7):
 * T7 (always-on): the dedicated ``frontend`` build context denylist
   excludes host artifacts (``node_modules/``, build output, emitted
   config shadows) and itself, so only tracked sources enter web images.
+* T9: each composed ``<project>_{api,web}`` image postdates the newest
+  mtime among its inputs; stale tags fail naming an ``rmi``-rebuild
+  remedy, absent tags tolerate (never composed).
+* E2E (gated on ``DAFI_COMPOSED_E2E=1``): a unique-project compose boot
+  serves :8000/docs, :5173 HTML, and a proxied route through the
+  api->web chain, then tears everything down.
 
 Podman-dependent guards skip cleanly when podman is absent so podman-less
 CI stays green (exit 0). No new pytest markers are registered — the
@@ -30,9 +36,15 @@ because podman resolves ignorefiles from the context root, not from the
 Containerfile directory.
 """
 
+import http.client
+import os
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
 import yaml
@@ -48,6 +60,18 @@ WEB_IMAGE = "dafi-sentinel-web:local"
 # bounded well below CI job limits.
 BUILD_TIMEOUT = 900
 RUN_TIMEOUT = 300
+
+# Composed-boot E2E gate (design D8): mirrors DAFI_PGVECTOR_SMOKE so the
+# default suite stays infra-free; E2E_TIMEOUT bounds up/poll/teardown.
+E2E_GATE_ENV = "DAFI_COMPOSED_E2E"
+E2E_TIMEOUT = 600
+
+# Compose project-name derivation mirrors podman-compose 1.6.0 precedence
+# (no -p flag, COMPOSE_PROJECT_NAME unset): basename of the compose-file's
+# directory. Confirmed live at apply time: the dual-profile build tagged
+# localhost/podman_api and localhost/podman_web for infra/podman/compose.yaml.
+COMPOSE_PROJECT = Path("infra/podman/compose.yaml").parent.name
+COMPOSED_IMAGE_TAGS = (f"{COMPOSE_PROJECT}_api", f"{COMPOSE_PROJECT}_web")
 
 requires_podman = pytest.mark.skipif(
     shutil.which("podman") is None, reason="podman not available"
@@ -384,3 +408,232 @@ def test_t8_compose_web_profile_gated_with_loopback_publish():
     assert ports == ["127.0.0.1:5173:5173"], f"web publishes non-loopback: {ports}"
     assert not web.get("volumes"), f"web mounts host paths: {web['volumes']}"
     assert "api" in web.get("depends_on", {}), "web does not depend on api"
+
+
+def _image_input_paths() -> list[Path]:
+    """Tracked inputs whose edits invalidate the composed api/web images."""
+    return sorted(
+        {
+            *PROJECT_ROOT.glob("infra/podman/Containerfile*"),
+            *PROJECT_ROOT.glob("frontend/package*.json"),
+            *PROJECT_ROOT.glob("frontend/index.html"),
+            *PROJECT_ROOT.glob("frontend/vite.config.ts"),
+            *PROJECT_ROOT.glob("frontend/tsconfig*.json"),
+            *(p for p in (PROJECT_ROOT / "frontend" / "src").rglob("*") if p.is_file()),
+        }
+    )
+
+
+def _newest_input_mtime() -> float:
+    """Newest input mtime as UTC epoch seconds (stat mtimes are UTC-based)."""
+    paths = _image_input_paths()
+    assert paths, "no web/api image inputs found under infra/ or frontend/"
+    return max(path.stat().st_mtime for path in paths)
+
+
+def _image_created_unix(tag: str) -> int | None:
+    """Image creation time as UTC epoch seconds; None when the tag is absent.
+
+    ``{{.Created.Unix}}`` renders Go's ``time.Time`` directly as an integer
+    Unix epoch — already the UTC-normalized timeline, so no RFC3339 parsing
+    is needed to compare against stat mtimes.
+    """
+    proc = subprocess.run(
+        ["podman", "image", "inspect", "-f", "{{.Created.Unix}}", tag],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None  # absent tag: never composed — tolerated by the guard
+    return int(proc.stdout.strip())
+
+
+def _select_stale(created_by_tag: dict[str, int | None], newest_input: float) -> list[str]:
+    """Pure freshness core: present tags created before the newest input.
+
+    Absent tags (``None``) tolerate, and a creation tie counts fresh —
+    buildah stamps images after reading inputs, so ``created < mtime`` is
+    the only genuinely stale ordering.
+    """
+    return sorted(
+        tag
+        for tag, created in created_by_tag.items()
+        if created is not None and created < newest_input
+    )
+
+
+def test_select_stale_flags_only_present_tags_older_than_newest_input():
+    """Freshness core: only present tags predating the newest input go stale."""
+    stale = _select_stale(
+        {"podman_api": 100, "podman_web": 300, "podman_postgres": None},
+        newest_input=200.0,
+    )
+    assert stale == ["podman_api"]
+
+
+def test_select_stale_tolerates_absent_tags_and_creation_ties():
+    """Absent tags (never composed) tolerate; equal timestamps count fresh."""
+    assert _select_stale({"podman_api": None, "podman_web": None}, 0.0) == []
+    assert _select_stale({"podman_api": 200}, 200.0) == []
+
+
+@requires_podman
+def test_t9_composed_images_fresh_against_newest_inputs():
+    """T9: composed ``<project>_{api,web}`` images postdate their inputs.
+
+    Freshness compares each composed tag's creation time against the newest
+    mtime among its inputs (Containerfiles, package manifests and lockfiles,
+    frontend configs, ``frontend/src/**``). Strict image-ID equality is
+    unsound — buildah stamps creation at build time, so identical inputs
+    legitimately rebuild to different IDs. Absent tags tolerate as a pass
+    (the stack was simply never composed). A stale tag fails naming the tag
+    and the ``rmi``-rebuild remedy. ``git pull`` bumps input mtimes forward,
+    so freshly pulled trees read false-stale — acceptable: the guard fails
+    safe toward rebuilding. The remedy uses ``rmi -f`` because a plain rmi
+    only untags: the guard-built ``:local`` tags pin identical content, and
+    a fully-cached rebuild then resurrects the old image object with its
+    original (still stale) creation stamp — drilled live at apply time.
+    """
+    newest = _newest_input_mtime()
+    created_by_tag = {tag: _image_created_unix(tag) for tag in COMPOSED_IMAGE_TAGS}
+    stale = _select_stale(created_by_tag, newest)
+    assert not stale, (
+        f"stale composed image(s) {stale}: tracked inputs changed after the "
+        f"images were built; remedy: podman rmi -f {' '.join(stale)} && "
+        "podman-compose -f infra/podman/compose.yaml --profile api "
+        "--profile web up -d --build"
+    )
+
+
+def _poll_http(
+    url: str,
+    accept: Callable[[int, str], bool],
+    deadline: float,
+) -> tuple[int, str]:
+    """Poll ``url`` until ``accept(status, body)`` holds or the deadline hits.
+
+    Connection refusals (services still booting) and proxy failure
+    signatures (502/504 from the vite proxy, 5xx while uvicorn binds)
+    never satisfy ``accept``; they keep polling and surface in the
+    deadline failure message instead of aborting early.
+    """
+    last = "no response yet"
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            pytest.fail(f"{url} never satisfied readiness within E2E_TIMEOUT; last: {last}")
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                status_code, body = response.status, response.read(2048).decode("utf-8", "replace")
+        except urllib.error.HTTPError as err:
+            status_code = err.code
+            body = err.read(2048).decode("utf-8", "replace") if err.fp else ""
+        except (OSError, http.client.HTTPException) as err:
+            # Refusals/resets while services bind (URLError and raw
+            # ConnectionResetError are both OSErrors); retry to deadline.
+            last = f"connection error ({getattr(err, 'reason', err)})"
+            sleep(min(2.0, remaining))
+            continue
+        if accept(status_code, body):
+            return status_code, body
+        last = f"HTTP {status_code}: {body[:120]!r}"
+        sleep(min(2.0, remaining))
+
+
+def _compose_residue(project: str) -> str:
+    """Containers/networks still named for the compose project ('' = clean)."""
+    ps = subprocess.run(
+        ["podman", "ps", "-a", "--filter", f"name={project}", "--format", "{{.Names}}"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    networks = subprocess.run(
+        ["podman", "network", "ls", "--filter", f"name={project}", "--format", "{{.Name}}"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    return "\n".join([*ps.stdout.split(), *networks.stdout.split()])
+
+
+@pytest.mark.skipif(os.environ.get(E2E_GATE_ENV) != "1", reason=f"{E2E_GATE_ENV} != 1")
+@requires_podman_compose
+def test_e2e_composed_boot_serves_dashboard_chain():
+    """Env-gated composed-boot E2E: postgres -> api -> web over real ports.
+
+    Skipped unless ``DAFI_COMPOSED_E2E=1`` (mirrors the ``DAFI_PGVECTOR_SMOKE``
+    gating; the default suite stays infra-free). Runs under a unique compose
+    project name (``dafi-composed-e2e-<pid>``) so dev stacks cannot collide;
+    the documented precondition is host ports 8000/5173 free — a unique
+    project cannot free already-published ports. Teardown (``down -v``) runs
+    on every outcome in ``try``/``finally``, and a pass additionally asserts
+    zero container/network residue.
+    """
+    project = f"dafi-composed-e2e-{os.getpid()}"
+    compose = [
+        "podman-compose",
+        "-f",
+        "infra/podman/compose.yaml",
+        "-p",
+        project,
+        "--profile",
+        "api",
+        "--profile",
+        "web",
+    ]
+    deadline = monotonic() + E2E_TIMEOUT
+    failure: BaseException | None = None
+    try:
+        up = subprocess.run(
+            [*compose, "up", "-d"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=E2E_TIMEOUT,
+            check=False,
+        )
+        assert up.returncode == 0, up.stderr[-4000:] + up.stdout[-2000:]
+
+        _poll_http("http://127.0.0.1:8000/docs", lambda status, _: status == 200, deadline)
+
+        _, root_html = _poll_http(
+            "http://127.0.0.1:5173/",
+            lambda status, body: status == 200 and 'id="root"' in body,
+            deadline,
+        )
+        assert 'id="root"' in root_html
+
+        # GET /sessions hits the POST-only login route: unauthenticated, the
+        # api answers 405 {"detail": "Method Not Allowed"} (verified against
+        # the app factory at apply time; 401/200 accepted defensively). A
+        # proxy failure (502/504) or refusal never satisfies accept and
+        # surfaces as a deadline failure instead.
+        _poll_http(
+            "http://127.0.0.1:5173/sessions",
+            lambda status, _: status in (200, 401, 405),
+            deadline,
+        )
+    except BaseException as exc:  # noqa: BLE001 - teardown must run on any outcome
+        failure = exc
+        raise
+    finally:
+        down = subprocess.run(
+            [*compose, "down", "-v"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=E2E_TIMEOUT,
+            check=False,
+        )
+        if failure is None:
+            assert down.returncode == 0, down.stderr[-2000:]
+            residue = _compose_residue(project)
+            assert not residue, f"E2E left residue after down -v: {residue}"
