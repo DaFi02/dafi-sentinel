@@ -341,3 +341,46 @@ def test_t6_web_image_suite_passes_in_image():
     assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
     # A green run must have executed tests (T2 analog for vitest).
     assert "passed" in run.stdout
+
+
+@requires_podman_compose
+def test_t8_compose_web_profile_gated_with_loopback_publish():
+    """T8: web stays profile-gated; dual-profile render yields the full chain.
+
+    Plain startup must remain postgres-only (spec R5). Starting the
+    dashboard requires BOTH profiles — podman-compose does not auto-enable
+    depended-on services gated behind another profile (design D6) — and the
+    rendered web service must publish loopback-only :5173, mount nothing,
+    and depend on api.
+    """
+    compose = ["podman-compose", "-f", "infra/podman/compose.yaml"]
+
+    plain = subprocess.run(
+        [*compose, "config"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT,
+        check=False,
+    )
+    assert plain.returncode == 0, plain.stderr[-2000:]
+    assert "web" not in yaml.safe_load(plain.stdout)["services"]
+
+    profiled = subprocess.run(
+        [*compose, "--profile", "api", "--profile", "web", "config"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT,
+        check=False,
+    )
+    assert profiled.returncode == 0, profiled.stderr[-2000:]
+    services = yaml.safe_load(profiled.stdout)["services"]
+    # The dashboard chain is postgres -> api -> web, all three rendered.
+    assert {"postgres", "api", "web"} == set(services)
+
+    web = services["web"]
+    ports = [str(port) for port in web.get("ports", []) or []]
+    assert ports == ["127.0.0.1:5173:5173"], f"web publishes non-loopback: {ports}"
+    assert not web.get("volumes"), f"web mounts host paths: {web['volumes']}"
+    assert "api" in web.get("depends_on", {}), "web does not depend on api"

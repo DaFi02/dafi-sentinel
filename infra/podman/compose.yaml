@@ -1,6 +1,7 @@
 version: "3.8"
 
-# Podman Compose stack for the DAFI Sentinel retrieval smoke + API.
+# Podman Compose stack for the DAFI Sentinel retrieval smoke + API +
+# dashboard dev server.
 #
 # Bring up with (postgres only; add --profile api for the API):
 #   podman-compose -f infra/podman/compose.yaml up -d
@@ -14,6 +15,12 @@ version: "3.8"
 # Serve the API against this database (profile-gated, design D4):
 #   podman-compose -f infra/podman/compose.yaml --profile api up -d
 #   curl http://127.0.0.1:8000/docs
+#
+# Canonical dashboard startup (design D6): BOTH profiles are required —
+# podman-compose does not auto-enable depended-on services gated behind
+# another profile, so --profile web alone would die at boot:
+#   podman-compose -f infra/podman/compose.yaml --profile api --profile web up -d
+#   # dashboard at http://127.0.0.1:5173 (proxies /sessions etc. to api)
 #
 # This stack intentionally exposes PostgreSQL on 127.0.0.1:55432 (not 5432)
 # so it cannot collide with a system Postgres instance, and the volume is
@@ -60,6 +67,29 @@ services:
         condition: service_healthy
     entrypoint: ["python", "/opt/dafi/wait_for_postgres.py"]
     command: ["uvicorn", "dafi_sentinel.api.app:default_workbench_app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+
+  # Opt-in dashboard dev server (design D6): hidden behind the "web"
+  # profile so a plain `up -d` still starts postgres only. Builds from the
+  # dedicated frontend/ context (its .containerignore keeps host
+  # node_modules and emitted config shadows out of layers) with the
+  # Containerfile living OUTSIDE the context — resolved relative to the
+  # compose file, proven by the Phase-4 probe. Publishes loopback-only,
+  # mounts nothing (source and deps are baked into the image), and the
+  # vite proxy targets the api service DNS name via DAFI_API_PROXY_TARGET.
+  web:
+    profiles: ["web"]
+    build:
+      context: ../../frontend
+      dockerfile: ../infra/podman/Containerfile.web
+      target: dev
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      DAFI_API_PROXY_TARGET: "http://api:8000"
+    depends_on:
+      api:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
