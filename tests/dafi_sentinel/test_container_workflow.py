@@ -14,6 +14,10 @@ design D7):
   loopback-only, and no host ``.venv`` path is mounted.
 * T4: a bare ``podman build`` (no ``--target``) yields the deployable
   runtime leaf — uvicorn entrypoint running as uid 10001.
+* T5: the web dev target builds from the dedicated frontend context and
+  the image runs as uid 10001.
+* T6: the web dev image runs the infra-free vitest suite in-image
+  (a nonzero exit fails).
 * T7 (always-on): the dedicated ``frontend`` build context denylist
   excludes host artifacts (``node_modules/``, build output, emitted
   config shadows) and itself, so only tracked sources enter web images.
@@ -35,8 +39,10 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONTAINERFILE = "infra/podman/Containerfile"
+CONTAINERFILE_WEB = "infra/podman/Containerfile.web"
 API_IMAGE = "dafi-sentinel-api:local"
 TEST_IMAGE = "dafi-sentinel-test:local"
+WEB_IMAGE = "dafi-sentinel-web:local"
 
 # Subprocess ceilings from design D7: builds are slow cold, suite runs are
 # bounded well below CI job limits.
@@ -64,6 +70,32 @@ def _build_target(target: str, tag: str) -> subprocess.CompletedProcess[str]:
             "-t",
             tag,
             ".",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=BUILD_TIMEOUT,
+        check=False,
+    )
+
+
+def _build_web(tag: str) -> subprocess.CompletedProcess[str]:
+    """Build the web dev target from the dedicated frontend context (-f form).
+
+    The context root carries ``frontend/.containerignore``; podman reads
+    ignorefiles from the context root, not the Containerfile directory.
+    """
+    return subprocess.run(
+        [
+            "podman",
+            "build",
+            "-f",
+            CONTAINERFILE_WEB,
+            "--target",
+            "dev",
+            "-t",
+            tag,
+            "frontend",
         ],
         cwd=PROJECT_ROOT,
         capture_output=True,
@@ -275,3 +307,37 @@ def test_bare_build_defaults_to_runtime_leaf():
             timeout=120,
             check=False,
         )
+
+
+@requires_podman
+def test_t5_web_dev_target_builds_and_runs_as_uid_10001():
+    """T5: the web dev target builds rc 0 from frontend/ as uid 10001."""
+    build = _build_web(WEB_IMAGE)
+    assert build.returncode == 0, build.stderr[-4000:]
+
+    inspect = subprocess.run(
+        ["podman", "image", "inspect", "-f", "{{.Config.User}}", WEB_IMAGE],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert inspect.returncode == 0, inspect.stderr
+    assert inspect.stdout.strip() == "10001"
+
+
+@requires_podman
+def test_t6_web_image_suite_passes_in_image():
+    """T6: the web dev image runs the infra-free vitest suite green."""
+    run = subprocess.run(
+        ["podman", "run", "--rm", WEB_IMAGE, "npm", "run", "test"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT,
+        check=False,
+    )
+    assert run.returncode == 0, run.stdout[-2000:] + run.stderr[-2000:]
+    # A green run must have executed tests (T2 analog for vitest).
+    assert "passed" in run.stdout
